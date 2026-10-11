@@ -11,7 +11,7 @@ from tkinter import ttk, messagebox, filedialog
 from PIL import Image, ImageTk, ImageOps
 
 from telethon import TelegramClient
-from telethon.errors import FloodWaitError, SessionPasswordNeededError
+from telethon.errors import FloodWaitError, SessionPasswordNeededError, ApiIdInvalidError
 import watcher_core as watcher
 from offers import OfferStore, command
 
@@ -47,6 +47,7 @@ class App:
         self.loop = asyncio.new_event_loop()
         threading.Thread(target=self.loop.run_forever, daemon=True).start()
         self.clients = {}
+        self.connecting = set()
         self.hashes = {}
         self.task = None
         self.paused = False
@@ -197,6 +198,8 @@ class App:
         async def guard():
             try:
                 await coro
+            except ApiIdInvalidError:
+                self.log('Ошибка: Telegram отклонил пару API ID / API Hash. Скопируйте оба значения из одного приложения на my.telegram.org/apps и повторите подключение.')
             except Exception as exc:
                 self.log(f'Ошибка: {type(exc).__name__} (проверьте настройки/доступ)')
         asyncio.run_coroutine_threadsafe(guard(), self.loop)
@@ -205,17 +208,31 @@ class App:
         try:
             api_id = int(self.api_id.get())
             api_hash = self.api_hash.get().strip()
-            if not api_hash:
+            if api_id <= 0 or not re.fullmatch(r'[0-9a-fA-F]{32}', api_hash):
                 raise ValueError()
         except ValueError:
-            messagebox.showerror('Настройки', 'Введите API ID и API Hash с my.telegram.org')
+            messagebox.showerror('Настройки', 'API ID — положительное число. API Hash — 32 символа 0–9 / a–f. Скопируйте оба из одного приложения на my.telegram.org/apps.')
             return
         phone = self.rows[i][0].get().strip()
         async def run():
             if self.task and not self.task.done():
                 self.log('Остановите сканирование перед подключением аккаунтов')
                 return
+            await self.connect_account(i, api_id, api_hash, phone)
+        self.submit(run())
+
+    async def connect_account(self, i, api_id, api_hash, phone):
+        if i in self.connecting:
+            self.log(f'Аккаунт {i+1}: подключение уже выполняется')
+            return
+        self.connecting.add(i)
+        try:
             client = self.clients.get(i)
+            if client is not None and (client.api_id != api_id or client.api_hash != api_hash):
+                await client.disconnect()
+                self.clients.pop(i, None)
+                self.hashes.pop(i, None)
+                client = None
             if client is None:
                 client = TelegramClient(str(DATA / f'account_{i+1}'), api_id, api_hash)
                 self.clients[i] = client
@@ -226,7 +243,12 @@ class App:
                 response = await client.send_code_request(phone)
                 self.hashes[i] = (phone, response.phone_code_hash)
                 self.logs.put(('status', (i, 'Введите код')))
-        self.submit(run())
+        except ApiIdInvalidError:
+            self.hashes.pop(i, None)
+            self.logs.put(('status', (i, 'Проверьте API ID / Hash')))
+            raise
+        finally:
+            self.connecting.discard(i)
 
     def login(self, i):
         code, password = self.rows[i][1].get().strip(), self.rows[i][2].get()

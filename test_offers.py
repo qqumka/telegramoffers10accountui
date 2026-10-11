@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 import tempfile
+import queue
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -31,6 +32,23 @@ class Commands(unittest.TestCase):
 
 
 class Integration(unittest.IsolatedAsyncioTestCase):
+    async def test_changed_api_credentials_replace_cached_client(self):
+        app = desktop.App.__new__(desktop.App)
+        old = SimpleNamespace(api_id=1, api_hash='old', disconnect=AsyncMock())
+        new = SimpleNamespace(connect=AsyncMock(), is_user_authorized=AsyncMock(return_value=False),
+                              send_code_request=AsyncMock(return_value=SimpleNamespace(phone_code_hash='new-code')))
+        app.clients, app.hashes, app.connecting = {0: old}, {0: ('old-phone', 'old-code')}, set()
+        app.logs = queue.Queue()
+        app.log = lambda text: None
+        with patch.object(desktop, 'TelegramClient', return_value=new) as factory:
+            await app.connect_account(0, 2, 'new', '+10000000000')
+        old.disconnect.assert_awaited_once()
+        self.assertIs(app.clients[0], new)
+        self.assertEqual(factory.call_args.args[1:], (2, 'new'))
+        new.send_code_request.assert_awaited_once_with('+10000000000')
+        self.assertEqual(app.hashes[0], ('+10000000000', 'new-code'))
+        self.assertFalse(app.connecting)
+
     async def check_mode(self, live):
         app = desktop.App.__new__(desktop.App)
         clients = {i: SimpleNamespace(is_user_authorized=AsyncMock(return_value=True), send_message=AsyncMock()) for i in range(2)}
