@@ -1,5 +1,6 @@
 """Desktop tracker and round-robin offer sender. No group or bot required."""
 import asyncio
+from datetime import datetime
 import os
 from pathlib import Path
 import queue
@@ -60,15 +61,50 @@ class App:
         ttk.Button(controls, text='Запустить', command=self.start).pack(side='left', padx=10)
         ttk.Button(controls, text='Пауза / продолжить', command=lambda: self.loop.call_soon_threadsafe(self.pause)).pack(side='left')
         ttk.Button(controls, text='Остановить', command=lambda: self.loop.call_soon_threadsafe(self.stop)).pack(side='left')
-        self.output = tk.Text(root, wrap='word', state='disabled')
-        self.output.pack(fill='both', expand=True, padx=10, pady=10)
+        journal = ttk.LabelFrame(root, text='Журнал • время / статус / аккаунт / получатель', padding=8)
+        journal.pack(fill='both', expand=True, padx=10, pady=10)
+        toolbar = ttk.Frame(journal)
+        toolbar.pack(fill='x', pady=(0, 6))
+        self.follow = tk.BooleanVar(value=True)
+        ttk.Checkbutton(toolbar, text='Следить за новыми событиями', variable=self.follow).pack(side='left')
+        ttk.Label(toolbar, text='Зелёный — отправлено • голубой — предложение • красный — ошибка').pack(side='left', padx=12)
+        ttk.Button(toolbar, text='Очистить окно', command=self.clear_log).pack(side='right')
+        body = ttk.Frame(journal)
+        body.pack(fill='both', expand=True)
+        self.output = tk.Text(body, wrap='word', state='disabled', background='#111827',
+                              foreground='#d1d5db', selectbackground='#334155',
+                              font=('Menlo', 12), relief='flat', padx=12, pady=10,
+                              spacing1=4, spacing3=6)
+        scroll = ttk.Scrollbar(body, orient='vertical', command=self.output.yview)
+        self.output.configure(yscrollcommand=scroll.set)
+        scroll.pack(side='right', fill='y')
+        self.output.pack(side='left', fill='both', expand=True)
+        for tag, color in {'info': '#d1d5db', 'offer': '#7dd3fc', 'success': '#86efac',
+                           'warning': '#fcd34d', 'error': '#fca5a5'}.items():
+            self.output.tag_configure(tag, foreground=color)
         root.after(100, self.drain)
         root.protocol('WM_DELETE_WINDOW', self.close)
 
     def log(self, text):
-        self.logs.put(('log', text))
+        level = 'info'
+        badge = 'ИНФО'
+        if text.startswith('Отправлено'):
+            level, badge = 'success', 'ОТПРАВЛЕНО'
+        elif text.startswith(('Ошибка', 'Не отправлено', 'Сканирование остановлено:')):
+            level, badge = 'error', 'ОШИБКА'
+        elif text.startswith(('Пропуск', 'Telegram ограничил', 'Пауза')):
+            level, badge = 'warning', 'ВНИМАНИЕ'
+        elif text.startswith('Аккаунт') and '→' in text:
+            level, badge = 'offer', 'ПРЕДЛОЖЕНИЕ'
+        line = f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}  [{badge}]  {text}'
+        self.logs.put(('log', (level, line)))
         with (DATA / 'activity.log').open('a', encoding='utf-8') as f:
-            f.write(text + '\n')
+            f.write(line + '\n')
+
+    def clear_log(self):
+        self.output.configure(state='normal')
+        self.output.delete('1.0', 'end')
+        self.output.configure(state='disabled')
 
     def drain(self):
         while not self.logs.empty():
@@ -76,10 +112,15 @@ class App:
             if kind == 'status':
                 i, text = payload
                 self.rows[i][3].set(text)
+                self.log(f'Аккаунт {i+1}: {text}')
             else:
+                level, line = payload
                 self.output.configure(state='normal')
-                self.output.insert('end', payload + '\n')
-                self.output.see('end')
+                self.output.insert('end', line + '\n', level)
+                if int(self.output.index('end-1c').split('.')[0]) > 5000:
+                    self.output.delete('1.0', '501.0')
+                if self.follow.get():
+                    self.output.see('end')
                 self.output.configure(state='disabled')
         self.root.after(100, self.drain)
 
@@ -230,10 +271,10 @@ class App:
                         return
                     except Exception as exc:
                         store.status(listing['slug'], 'failed')
-                        self.log(f'Не отправлено: {type(exc).__name__}; автоматического повтора нет')
+                        self.log(f'Не отправлено • аккаунт {slot+1} → @{recipient} • {listing["slug"]} • {type(exc).__name__}; автоматического повтора нет')
                     else:
                         store.status(listing['slug'], 'sent')
-                        self.log('Отправлено')
+                        self.log(f'Отправлено • аккаунт {slot+1} → @{recipient} • {listing["slug"]}')
                     await asyncio.sleep(max(1, watcher.SEND_DELAY_SECONDS))
                 self.log(f"Проход завершён: найдено {len(listings)}, ошибок запросов {stats['errors']}")
                 await asyncio.sleep(watcher.POLL_INTERVAL)

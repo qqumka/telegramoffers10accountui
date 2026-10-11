@@ -11,7 +11,7 @@ def command(slug, price):
     amount = int(matches[0]) * 95 // 100
     if amount < 1:
         raise ValueError('Цена предложения меньше одной звезды')
-    return f'.buy "https://t.me/nft/{slug}" "{amount}" stars'
+    return f'.buy https://t.me/nft/{slug} {amount} stars'
 
 
 class OfferStore:

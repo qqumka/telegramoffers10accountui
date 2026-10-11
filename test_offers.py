@@ -11,9 +11,9 @@ import desktop
 
 class Commands(unittest.TestCase):
     def test_discount_and_currency(self):
-        self.assertEqual(command('Gift-123', '100 XTR'), '.buy "https://t.me/nft/Gift-123" "95" stars')
-        self.assertIn('"95"', command('Gift-123', '101 XTR'))
-        self.assertIn('"190"', command('Gift-123', '1.0000 TON / 200 XTR'))
+        self.assertEqual(command('Gift-123', '100 XTR'), '.buy https://t.me/nft/Gift-123 95 stars')
+        self.assertIn(' 95 stars', command('Gift-123', '101 XTR'))
+        self.assertIn(' 190 stars', command('Gift-123', '1.0000 TON / 200 XTR'))
         for price in ('1.0000 TON', '—', '0 XTR', '10 XTR / 20 XTR'):
             with self.subTest(price=price), self.assertRaises(ValueError):
                 command('Gift-123', price)
@@ -48,7 +48,7 @@ class Integration(unittest.IsolatedAsyncioTestCase):
             if live:
                 self.assertEqual(clients[0].send_message.await_count, 2)
                 self.assertEqual(clients[1].send_message.await_count, 1)
-                self.assertEqual(clients[1].send_message.call_args.args, ('owner1', '.buy "https://t.me/nft/Gift-1" "95" stars'))
+                self.assertEqual(clients[1].send_message.call_args.args, ('owner1', '.buy https://t.me/nft/Gift-1 95 stars'))
             else:
                 for client in clients.values():
                     client.send_message.assert_not_awaited()
