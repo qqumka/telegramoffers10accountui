@@ -13,7 +13,7 @@ from telethon.tl.custom import Button
 from telethon.tl.functions.messages import GetForumTopicsRequest
 from telethon.tl.functions.users import GetRequirementsToContactRequest, GetFullUserRequest
 from telethon.tl.functions.channels import GetParticipantRequest
-from telethon.errors import UserNotParticipantError, SessionPasswordNeededError, PhoneCodeInvalidError
+from telethon.errors import UserNotParticipantError, SessionPasswordNeededError, PhoneCodeInvalidError, FloodWaitError
 from telethon.tl.types import RequirementToContactPaidMessages
 from telethon.tl.functions.payments import GetResaleStarGiftsRequest, GetStarGiftsRequest, GetSavedStarGiftsRequest
 GIFT_NAME_WHITELIST = {'Heart Locket', "Durov's Cap", 'Scared Cat', 'Precious Peach', "Khabib's Papakha", 'Heroic Helmet', 'Loot Bag', 'Astral Shard', 'Mighty Arm', 'Nail Bracelet', 'UFC box', 'Westside Sign', "Durov's Glasses", "Durov's Coat", 'Mini Oscar', 'Ion Gem', 'Perfume Bottle', "Durov's Boots", 'Gem Signet', 'Artisan Brick', 'Low Rider', 'Magic Potion', 'Swiss Watch', 'Gravestone', 'Sharp Tongue', 'Kissed Frog', 'Bonded Ring', 'Neko Helmet', 'Toy Bear', 'Vintage Cigar', 'Genie Lamp', 'Voodoo Doll', 'Signet Ring', 'Diamond Ring', 'Bling Binky', 'Electric Skull', 'Rare Bird', 'Eternal Rose', 'Coffin', 'Cupid Charm', 'Sky Stilettos', 'UFC Strike', 'Trapped Heart', 'Ionic Dryer', 'Snoop Cigar', 'Love Potion', 'Mad Pumpkin', 'Flying Broom', 'Record Player', 'Crystal Ball', 'Valentine Box'}
@@ -72,6 +72,8 @@ async def _resolve_single_owner(client: TelegramClient, uid: int) -> tuple:
         username = getattr(entity, 'username', None)
         premium = bool(getattr(entity, 'premium', False))
         last_seen_text = format_last_seen(getattr(entity, 'status', None))
+    except FloodWaitError:
+        raise
     except Exception as e:
         print(f'[!] Не удалось получить данные продавца id={uid}: {e}')
     gifts_count = None
@@ -85,14 +87,18 @@ async def _resolve_single_owner(client: TelegramClient, uid: int) -> tuple:
         rating = getattr(full_user, 'stars_rating', None)
         level = getattr(rating, 'level', None)
         about = getattr(full_user, 'about', None) or ''
+    except FloodWaitError:
+        raise
     except Exception as e:
         print(f'[!] Не удалось получить доп. данные (уровень/био) продавца id={uid}: {e}')
     if input_user is not None:
         try:
             gifts_count = await count_unique_gifts_in_profile(client, input_user)
+        except FloodWaitError:
+            raise
         except Exception as e:
             print(f'[!] Не удалось посчитать NFT-подарки продавца id={uid}: {e}')
-    info = {'username': username, 'paid': False, 'premium': premium, 'last_seen_text': last_seen_text, 'gifts_count': gifts_count, 'level': level, 'about': about}
+    info = {'username': username, 'paid': None, 'premium': premium, 'last_seen_text': last_seen_text, 'gifts_count': gifts_count, 'level': level, 'about': about}
     return (uid, info, input_user)
 
 async def resolve_owner_info(client: TelegramClient, new_listings: list) -> dict:
@@ -139,8 +145,9 @@ async def resolve_owner_info(client: TelegramClient, new_listings: list) -> dict
         try:
             result = await client(GetRequirementsToContactRequest(id=input_users))
             for uid, requirement in zip(resolved_order, result):
-                if isinstance(requirement, RequirementToContactPaidMessages):
-                    info[uid]['paid'] = True
+                info[uid]['paid'] = isinstance(requirement, RequirementToContactPaidMessages)
+        except FloodWaitError:
+            raise
         except Exception as e:
             print(f'[!] Ошибка users.getRequirementsToContact: {e}')
     return info
@@ -302,6 +309,8 @@ def format_price(resell_amount) -> str:
 async def check_gift(client: TelegramClient, gift_id: int, seen: set, new_listings: list, stats: dict) -> None:
     try:
         result = await client(GetResaleStarGiftsRequest(gift_id=gift_id, offset='', limit=LIMIT_PER_GIFT, sort_by_num=False, sort_by_price=False))
+    except FloodWaitError:
+        raise
     except Exception as e:
         print(f'[!] Ошибка запроса для gift_id={gift_id}: {e}')
         stats['errors'] += 1

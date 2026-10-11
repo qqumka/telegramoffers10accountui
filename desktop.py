@@ -317,13 +317,16 @@ class App:
                 while self.paused:
                     await asyncio.sleep(0.2)
                 listings = []
+                # check_gift marks discoveries locally; failed owner lookups must be retryable.
+                pass_seen = set(seen)
                 stats = dict(total_seen_in_responses=0, new_slugs=0, filtered_by_name=0, filtered_names_sample=[], errors=0)
                 for index, gift_id in enumerate(ids):
                     while self.paused:
                         await asyncio.sleep(0.2)
                     client = list(clients.values())[index % len(clients)]
-                    await watcher.check_gift(client, gift_id, seen, listings, stats)
+                    await watcher.check_gift(client, gift_id, pass_seen, listings, stats)
                     await asyncio.sleep(watcher.REQUEST_DELAY)
+                listings = [listing for listing in listings if not store.seen_owner(getattr(listing['owner_id'], 'user_id', None))]
                 info = await watcher.resolve_owner_info(primary, listings) if listings else {}
                 for listing in listings:
                     while self.paused:
@@ -331,7 +334,7 @@ class App:
                     uid = getattr(listing['owner_id'], 'user_id', None)
                     details = info.get(uid, {})
                     recipient = details.get('username')
-                    if not recipient or (watcher.EXCLUDE_PAID_MESSAGE_SELLERS and details.get('paid')):
+                    if not recipient or (watcher.EXCLUDE_PAID_MESSAGE_SELLERS and details.get('paid') is not False):
                         continue
                     if not watcher.looks_cjk_anywhere(listing['owner_name'], details.get('about', '')):
                         level = details.get('level')
@@ -347,7 +350,8 @@ class App:
                         continue
                     if watcher.MAX_PRICE_STARS and original > watcher.MAX_PRICE_STARS:
                         continue
-                    slot = store.reserve(listing['slug'], recipient, list(clients), text)
+                    slot = store.reserve(listing['slug'], recipient, list(clients), text, owner_id=uid)
+                    seen.add(listing['slug'])
                     if slot is None:
                         continue
                     self.log(f'Аккаунт {slot+1} → @{recipient}: {text}')
@@ -369,6 +373,8 @@ class App:
                     await asyncio.sleep(max(1, watcher.SEND_DELAY_SECONDS))
                 self.log(f"Проход завершён: найдено {len(listings)}, ошибок запросов {stats['errors']}")
                 await asyncio.sleep(watcher.POLL_INTERVAL)
+        except FloodWaitError as exc:
+            self.log(f'Telegram ограничил запросы на {exc.seconds} сек. Сканирование остановлено.')
         finally:
             store.db.close()
 
