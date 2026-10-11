@@ -65,6 +65,43 @@ class Commands(unittest.TestCase):
 
 
 class Integration(unittest.IsolatedAsyncioTestCase):
+    async def test_first_full_pass_remembers_gifts_without_sending(self):
+        for initial_error in (False, True):
+            with self.subTest(initial_error=initial_error):
+                app = desktop.App.__new__(desktop.App)
+                client = SimpleNamespace(is_user_authorized=AsyncMock(return_value=True), send_message=AsyncMock())
+                app.clients, app.paused, app.log = {0: client}, False, lambda text: None
+                passes = 0
+                final_pass = 3 if initial_error else 2
+                async def found(client, gift_id, seen, listings, stats):
+                    stats['errors'] = int(initial_error and passes == 0)
+                    for i in range(passes + 1):
+                        slug = f'Gift-{i}'
+                        if slug not in seen:
+                            seen.add(slug)
+                            listings.append(dict(slug=slug, price='100 XTR', owner_id=SimpleNamespace(user_id=100 + i), owner_name='Owner'))
+                async def sleep(delay):
+                    nonlocal passes
+                    if delay == desktop.watcher.POLL_INTERVAL:
+                        passes += 1
+                        if passes < final_pass:
+                            client.send_message.assert_not_awaited()
+                        else:
+                            raise asyncio.CancelledError()
+                info = {100 + i: dict(username=f'owner{i}', paid=False, level=0) for i in range(3)}
+                with tempfile.TemporaryDirectory() as folder, patch.object(desktop, 'DATA', Path(folder)), patch.object(desktop.watcher, 'get_gift_ids_by_names', AsyncMock(return_value=[1])), patch.object(desktop.watcher, 'check_gift', found), patch.object(desktop.watcher, 'resolve_owner_info', AsyncMock(return_value=info)) as resolve, patch.object(desktop.asyncio, 'sleep', sleep):
+                    with self.assertRaises(asyncio.CancelledError):
+                        await app.scan(True)
+                    i = final_pass - 1
+                    client.send_message.assert_awaited_once_with(f'owner{i}', f'.buy https://t.me/nft/Gift-{i} 95 stars', parse_mode=None)
+                    self.assertEqual(resolve.await_count, 1)
+                    store = OfferStore(Path(folder) / 'offers.sqlite')
+                    self.assertEqual(store.db.execute('SELECT COUNT(*) FROM baseline_gifts').fetchone()[0], final_pass - 1)
+                    self.assertEqual(store.db.execute('SELECT account FROM offers').fetchone()[0], 0)
+                    self.assertFalse(store.seen_owner(100, 'owner0'))
+                    self.assertIn('Gift-0', store.known_slugs())
+                    store.db.close()
+
     async def test_transient_owner_failures_are_retried(self):
         for initial_info in ({}, {123: dict(username='owner', paid=None, level=0)}):
             with self.subTest(initial_info=initial_info):
@@ -72,7 +109,12 @@ class Integration(unittest.IsolatedAsyncioTestCase):
                 client = SimpleNamespace(is_user_authorized=AsyncMock(return_value=True), send_message=AsyncMock())
                 app.clients, app.paused, app.log = {0: client}, False, lambda text: None
                 passes = 0
+                fetches = 0
                 async def found(client, gift_id, seen, listings, stats):
+                    nonlocal fetches
+                    fetches += 1
+                    if fetches == 1:
+                        return
                     if 'Retry-1' not in seen:
                         seen.add('Retry-1')
                         listings.append(dict(slug='Retry-1', price='100 XTR', owner_id=SimpleNamespace(user_id=123), owner_name='Owner'))
@@ -80,7 +122,7 @@ class Integration(unittest.IsolatedAsyncioTestCase):
                     nonlocal passes
                     if delay == desktop.watcher.POLL_INTERVAL:
                         passes += 1
-                        if passes == 2:
+                        if passes == 3:
                             raise asyncio.CancelledError()
                 final_info = {123: dict(username='owner', paid=False, level=0)}
                 with tempfile.TemporaryDirectory() as folder, patch.object(desktop, 'DATA', Path(folder)), patch.object(desktop.watcher, 'get_gift_ids_by_names', AsyncMock(return_value=[1])), patch.object(desktop.watcher, 'check_gift', found), patch.object(desktop.watcher, 'resolve_owner_info', AsyncMock(side_effect=[initial_info, final_info])) as resolve, patch.object(desktop.asyncio, 'sleep', sleep):
@@ -126,12 +168,21 @@ class Integration(unittest.IsolatedAsyncioTestCase):
         app = desktop.App.__new__(desktop.App)
         clients = {i: SimpleNamespace(is_user_authorized=AsyncMock(return_value=True), send_message=AsyncMock()) for i in range(2)}
         app.clients, app.paused, app.log = clients, False, lambda text: None
+        fetches = 0
+        passes = 0
         async def found(client, gift_id, seen, listings, stats):
+            nonlocal fetches
+            fetches += 1
+            if fetches == 1:
+                return
             for i in range(3):
                 listings.append(dict(slug=f'Gift-{i}', price='100 XTR', owner_id=SimpleNamespace(user_id=0 if same_owner else i), owner_name='Owner'))
         async def sleep(delay):
+            nonlocal passes
             if delay == desktop.watcher.POLL_INTERVAL:
-                raise asyncio.CancelledError()
+                passes += 1
+                if passes == 2:
+                    raise asyncio.CancelledError()
         info = {i: dict(username=f'owner{i}', paid=False, level=0) for i in range(3)}
         with tempfile.TemporaryDirectory() as folder, patch.object(desktop, 'DATA', Path(folder)), patch.object(desktop.watcher, 'get_gift_ids_by_names', AsyncMock(return_value=[1])), patch.object(desktop.watcher, 'check_gift', found), patch.object(desktop.watcher, 'resolve_owner_info', AsyncMock(return_value=info)), patch.object(desktop.asyncio, 'sleep', sleep):
             with self.assertRaises(asyncio.CancelledError):

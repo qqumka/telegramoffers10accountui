@@ -301,7 +301,8 @@ class App:
             return
         primary = next(iter(clients.values()))
         store = OfferStore(DATA / ('offers.sqlite' if live else 'preview.sqlite'))
-        seen = {row[0] for row in store.db.execute('SELECT slug FROM offers')}
+        seen = store.known_slugs()
+        warming_up = True
         self.log('Режим: ' + ('ОТПРАВКА' if live else 'ПРЕДПРОСМОТР — сообщения не отправляются'))
         try:
             if watcher.GIFT_NAME_WHITELIST:
@@ -312,7 +313,11 @@ class App:
                 ids = await watcher.get_all_gift_ids(primary)
             else:
                 ids = await watcher.get_newest_gift_ids(primary, watcher.NUM_NEWEST_COLLECTIONS)
+            if not ids:
+                self.log('Ошибка: не найдено коллекций для сканирования')
+                return
             self.log(f'Коллекций: {len(ids)}; аккаунтов: {len(clients)}')
+            self.log('Первый проход: запоминаю текущие подарки, без предложений и отправки')
             while True:
                 while self.paused:
                     await asyncio.sleep(0.2)
@@ -326,6 +331,17 @@ class App:
                     client = list(clients.values())[index % len(clients)]
                     await watcher.check_gift(client, gift_id, pass_seen, listings, stats)
                     await asyncio.sleep(watcher.REQUEST_DELAY)
+                if warming_up:
+                    baseline = [listing['slug'] for listing in listings]
+                    store.remember_baseline(baseline)
+                    seen.update(baseline)
+                    if stats['errors']:
+                        self.log(f"Прогрев: запомнено {len(baseline)} подарков; ошибок {stats['errors']}. Отправка выключена до полного прохода без ошибок.")
+                    else:
+                        warming_up = False
+                        self.log(f'Первый проход завершён: запомнено {len(baseline)} подарков. Следующие проходы обрабатывают только новые находки.')
+                    await asyncio.sleep(watcher.POLL_INTERVAL)
+                    continue
                 listings = [listing for listing in listings if not store.seen_owner(getattr(listing['owner_id'], 'user_id', None))]
                 info = await watcher.resolve_owner_info(primary, listings) if listings else {}
                 for listing in listings:

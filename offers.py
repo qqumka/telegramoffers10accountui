@@ -20,10 +20,18 @@ class OfferStore:
         self.db.execute('CREATE TABLE IF NOT EXISTS offers (slug TEXT PRIMARY KEY, recipient TEXT, account INTEGER, command TEXT, status TEXT)')
         self.db.execute('CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value INTEGER)')
         self.db.execute('CREATE TABLE IF NOT EXISTS owners (owner_key TEXT PRIMARY KEY, recipient TEXT)')
+        self.db.execute('CREATE TABLE IF NOT EXISTS baseline_gifts (slug TEXT PRIMARY KEY)')
         if not self.db.execute("SELECT 1 FROM state WHERE key='owners_migrated'").fetchone():
             self.db.execute("INSERT OR IGNORE INTO owners SELECT 'name:' || lower(ltrim(recipient, '@')), lower(ltrim(recipient, '@')) FROM offers")
             self.db.execute("INSERT INTO state VALUES ('owners_migrated', 1)")
         self.db.commit()
+
+    def known_slugs(self):
+        return {row[0] for row in self.db.execute('SELECT slug FROM offers UNION SELECT slug FROM baseline_gifts')}
+
+    def remember_baseline(self, slugs):
+        with self.db:
+            self.db.executemany('INSERT OR IGNORE INTO baseline_gifts VALUES (?)', ((slug,) for slug in slugs))
 
     def seen_owner(self, owner_id, recipient=None):
         key = f'id:{owner_id}' if owner_id is not None else None
