@@ -7,7 +7,8 @@ import queue
 import re
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
+from PIL import Image, ImageTk, ImageOps
 
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
@@ -23,7 +24,22 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title('Telegram Gifts — 10 аккаунтов')
-        root.geometry('1050x700')
+        root.geometry('1050x880')
+        self.banner_source = None
+        self.banner_photo = None
+        self.banner_resize = None
+        self.banner = tk.Canvas(root, height=170, background='#111111', highlightthickness=0)
+        self.banner.pack(fill='x')
+        self.banner.bind('<Configure>', self.schedule_banner)
+        banner_path = DATA / 'banner.png'
+        if not banner_path.exists():
+            banner_path = ROOT / 'assets' / 'banner.png'
+        if banner_path.exists():
+            try:
+                with Image.open(banner_path) as image:
+                    self.banner_source = ImageOps.exif_transpose(image).convert('RGB')
+            except (OSError, ValueError):
+                messagebox.showwarning('Баннер', 'Не удалось прочитать обложку. Выберите изображение заново.')
         self.logs = queue.Queue()
         self.loop = asyncio.new_event_loop()
         threading.Thread(target=self.loop.run_forever, daemon=True).start()
@@ -39,6 +55,7 @@ class App:
         ttk.Entry(header, textvariable=self.api_id, width=12).pack(side='left')
         ttk.Label(header, text='API Hash').pack(side='left', padx=10)
         ttk.Entry(header, textvariable=self.api_hash, show='*', width=36).pack(side='left')
+        ttk.Button(header, text='Выбрать обложку', command=self.choose_banner).pack(side='right')
         self.rows = []
         panel = ttk.Frame(root, padding=10)
         panel.pack(fill='x')
@@ -84,6 +101,40 @@ class App:
             self.output.tag_configure(tag, foreground=color)
         root.after(100, self.drain)
         root.protocol('WM_DELETE_WINDOW', self.close)
+
+    def schedule_banner(self, event):
+        if self.banner_resize is not None:
+            self.root.after_cancel(self.banner_resize)
+        self.banner_resize = self.root.after(80, self.draw_banner)
+
+    def choose_banner(self):
+        path = filedialog.askopenfilename(title='Выберите обложку Telegram Offers',
+                                         filetypes=[('Изображения', '*.png *.jpg *.jpeg *.webp'), ('Все файлы', '*')])
+        if not path:
+            return
+        try:
+            with Image.open(path) as image:
+                source = ImageOps.exif_transpose(image).convert('RGB')
+            temporary = DATA / 'banner.tmp.png'
+            source.save(temporary, format='PNG')
+            temporary.replace(DATA / 'banner.png')
+        except (OSError, ValueError, Image.DecompressionBombError):
+            messagebox.showerror('Обложка', 'Не удалось открыть или сохранить изображение. Выберите PNG или JPEG.')
+            return
+        self.banner_source = source
+        self.draw_banner()
+
+    def draw_banner(self):
+        self.banner_resize = None
+        width = max(1, self.banner.winfo_width())
+        self.banner.delete('all')
+        if self.banner_source is None:
+            self.banner.create_text(width // 2, 70, text='Telegram Offers', fill='#eeeeee', font=('Helvetica', 28, 'bold'))
+            self.banner.create_text(width // 2, 110, text='Добавьте свою картинку кнопкой «Выбрать обложку»', fill='#aaaaaa', font=('Helvetica', 12))
+            return
+        image = ImageOps.contain(self.banner_source, (width, 170), Image.Resampling.LANCZOS)
+        self.banner_photo = ImageTk.PhotoImage(image)
+        self.banner.create_image(width // 2, 85, image=self.banner_photo, anchor='center')
 
     def log(self, text):
         level = 'info'
