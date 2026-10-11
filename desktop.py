@@ -28,9 +28,12 @@ class App:
         self.banner_source = None
         self.banner_photo = None
         self.banner_resize = None
-        self.banner = tk.Canvas(root, height=170, background='#111111', highlightthickness=0)
-        self.banner.pack(fill='x')
-        self.banner.bind('<Configure>', self.schedule_banner)
+        root.configure(background='#111111')
+        self.background_panels = []
+        self.banner = tk.Label(root, background='#111111', borderwidth=0)
+        self.banner.place(x=0, y=0, relwidth=1, relheight=1)
+        self.banner.lower()
+        root.bind('<Configure>', lambda event: self.schedule_banner(event) if event.widget is root else None)
         banner_path = DATA / 'banner.png'
         if not banner_path.exists():
             banner_path = ROOT / 'assets' / 'banner.png'
@@ -49,7 +52,7 @@ class App:
         self.paused = False
         self.api_id = tk.StringVar(value=os.getenv('TG_API_ID', ''))
         self.api_hash = tk.StringVar(value=os.getenv('TG_API_HASH', ''))
-        header = ttk.Frame(root, padding=10)
+        header = self.background_panel(root)
         header.pack(fill='x')
         ttk.Label(header, text='API ID').pack(side='left')
         ttk.Entry(header, textvariable=self.api_id, width=12).pack(side='left')
@@ -57,7 +60,7 @@ class App:
         ttk.Entry(header, textvariable=self.api_hash, show='*', width=36).pack(side='left')
         ttk.Button(header, text='Выбрать обложку', command=self.choose_banner).pack(side='right')
         self.rows = []
-        panel = ttk.Frame(root, padding=10)
+        panel = self.background_panel(root)
         panel.pack(fill='x')
         for i in range(10):
             phone, code, password = tk.StringVar(), tk.StringVar(), tk.StringVar()
@@ -71,7 +74,7 @@ class App:
             ttk.Button(panel, text='Войти', command=lambda n=i: self.login(n)).grid(row=i, column=5)
             ttk.Label(panel, textvariable=status, width=25).grid(row=i, column=6)
         ttk.Label(panel, text='Поля: телефон • код Telegram • пароль 2FA (если нужен)').grid(row=10, column=0, columnspan=7, pady=8)
-        controls = ttk.Frame(root, padding=10)
+        controls = self.background_panel(root)
         controls.pack(fill='x')
         self.live = tk.BooleanVar(value=False)
         ttk.Checkbutton(controls, text='Отправлять владельцам (выключено = предпросмотр)', variable=self.live).pack(side='left')
@@ -100,7 +103,17 @@ class App:
                            'warning': '#fcd34d', 'error': '#fca5a5'}.items():
             self.output.tag_configure(tag, foreground=color)
         root.after(100, self.drain)
+        root.after_idle(self.draw_banner)
         root.protocol('WM_DELETE_WINDOW', self.close)
+
+    def background_panel(self, parent):
+        frame = tk.Frame(parent, background='#111111', padx=10, pady=10)
+        background = tk.Label(frame, background='#111111', borderwidth=0)
+        background.place(x=-10, y=-10, relwidth=1, relheight=1, width=20, height=20)
+        background.lower()
+        self.background_panels.append((frame, background))
+        frame.bind('<Configure>', self.schedule_banner)
+        return frame
 
     def schedule_banner(self, event):
         if self.banner_resize is not None:
@@ -126,15 +139,20 @@ class App:
 
     def draw_banner(self):
         self.banner_resize = None
-        width = max(1, self.banner.winfo_width())
-        self.banner.delete('all')
+        width = max(1, self.root.winfo_width())
+        height = max(1, self.root.winfo_height())
         if self.banner_source is None:
-            self.banner.create_text(width // 2, 70, text='Telegram Offers', fill='#eeeeee', font=('Helvetica', 28, 'bold'))
-            self.banner.create_text(width // 2, 110, text='Добавьте свою картинку кнопкой «Выбрать обложку»', fill='#aaaaaa', font=('Helvetica', 12))
             return
-        image = ImageOps.contain(self.banner_source, (width, 170), Image.Resampling.LANCZOS)
+        image = ImageOps.fit(self.banner_source, (width, height), Image.Resampling.LANCZOS)
+        image = Image.blend(image, Image.new('RGB', image.size, '#000000'), 0.25)
         self.banner_photo = ImageTk.PhotoImage(image)
-        self.banner.create_image(width // 2, 85, image=self.banner_photo, anchor='center')
+        self.banner.configure(image=self.banner_photo)
+        for frame, background in self.background_panels:
+            x = frame.winfo_rootx() - self.root.winfo_rootx()
+            y = frame.winfo_rooty() - self.root.winfo_rooty()
+            section = image.crop((x, y, x + frame.winfo_width(), y + frame.winfo_height()))
+            background.photo = ImageTk.PhotoImage(section)
+            background.configure(image=background.photo)
 
     def log(self, text):
         level = 'info'
