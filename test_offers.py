@@ -65,6 +65,24 @@ class Commands(unittest.TestCase):
 
 
 class Integration(unittest.IsolatedAsyncioTestCase):
+    async def test_logout_removes_only_selected_account_after_confirmation(self):
+        for success in (True, False):
+            with self.subTest(success=success):
+                app = desktop.App.__new__(desktop.App)
+                client = SimpleNamespace(log_out=AsyncMock(return_value=success))
+                other = object()
+                app.clients, app.hashes = {0: client, 1: other}, {0: ('phone', 'code')}
+                app.connecting, app.logs, app.task = set(), queue.Queue(), None
+                app.log = lambda text: None
+                await app.logout_account(0)
+                client.log_out.assert_awaited_once()
+                self.assertIs(app.clients[1], other)
+                self.assertEqual(0 in app.clients, not success)
+                self.assertEqual(0 in app.hashes, not success)
+                self.assertFalse(app.connecting)
+                if success:
+                    self.assertEqual(app.logs.get_nowait(), ('signed_out', 0))
+
     async def test_first_full_pass_remembers_gifts_without_sending(self):
         for initial_error in (False, True):
             with self.subTest(initial_error=initial_error):

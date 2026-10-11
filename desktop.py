@@ -74,7 +74,8 @@ class App:
             ttk.Entry(panel, textvariable=password, show='*', width=15).grid(row=i, column=4)
             ttk.Button(panel, text='Войти', command=lambda n=i: self.login(n)).grid(row=i, column=5)
             ttk.Label(panel, textvariable=status, width=25).grid(row=i, column=6)
-        ttk.Label(panel, text='Поля: телефон • код Telegram • пароль 2FA (если нужен)').grid(row=10, column=0, columnspan=7, pady=8)
+            ttk.Button(panel, text='Выйти', command=lambda n=i: self.logout(n)).grid(row=i, column=7, padx=4)
+        ttk.Label(panel, text='Поля: телефон • код Telegram • пароль 2FA (если нужен)').grid(row=10, column=0, columnspan=8, pady=8)
         controls = self.background_panel(root)
         controls.pack(fill='x')
         self.live = tk.BooleanVar(value=False)
@@ -179,7 +180,12 @@ class App:
     def drain(self):
         while not self.logs.empty():
             kind, payload = self.logs.get()
-            if kind == 'status':
+            if kind == 'signed_out':
+                i = payload
+                self.rows[i][1].set('')
+                self.rows[i][2].set('')
+                self.rows[i][3].set('Не подключён')
+            elif kind == 'status':
                 i, text = payload
                 self.rows[i][3].set(text)
                 self.log(f'Аккаунт {i+1}: {text}')
@@ -253,19 +259,59 @@ class App:
     def login(self, i):
         code, password = self.rows[i][1].get().strip(), self.rows[i][2].get()
         async def run():
-            client = self.clients[i]
-            if await client.is_user_authorized():
+            if i in self.connecting:
+                self.log(f'Аккаунт {i+1}: дождитесь завершения текущей операции')
                 return
-            phone, code_hash = self.hashes[i]
+            self.connecting.add(i)
             try:
-                await client.sign_in(phone, code, phone_code_hash=code_hash)
-            except SessionPasswordNeededError:
-                if not password:
-                    self.logs.put(('status', (i, 'Нужен пароль 2FA')))
+                client = self.clients.get(i)
+                if client is None:
+                    self.log(f'Аккаунт {i+1}: сначала нажмите «Получить код / сессия»')
                     return
-                await client.sign_in(password=password)
-            self.logs.put(('status', (i, 'Подключён')))
+                if await client.is_user_authorized():
+                    return
+                if i not in self.hashes:
+                    self.log(f'Аккаунт {i+1}: сначала запросите код Telegram')
+                    return
+                phone, code_hash = self.hashes[i]
+                try:
+                    await client.sign_in(phone, code, phone_code_hash=code_hash)
+                except SessionPasswordNeededError:
+                    if not password:
+                        self.logs.put(('status', (i, 'Нужен пароль 2FA')))
+                        return
+                    await client.sign_in(password=password)
+                self.logs.put(('status', (i, 'Подключён')))
+            finally:
+                self.connecting.discard(i)
         self.submit(run())
+
+    def logout(self, i):
+        if messagebox.askyesno('Выход из аккаунта', f'Завершить сессию аккаунта {i+1}? Сканирование будет остановлено. Для повторного входа потребуется код Telegram.'):
+            self.submit(self.logout_account(i))
+
+    async def logout_account(self, i):
+        if i in self.connecting:
+            self.log(f'Аккаунт {i+1}: дождитесь завершения текущей операции')
+            return
+        self.connecting.add(i)
+        try:
+            client = self.clients.get(i)
+            if client is None:
+                self.log(f'Аккаунт {i+1}: уже отключён')
+                return
+            if self.task and not self.task.done():
+                self.task.cancel()
+                await asyncio.gather(self.task, return_exceptions=True)
+            if not await client.log_out():
+                self.log(f'Ошибка: не удалось завершить сессию аккаунта {i+1}. Повторите позже.')
+                return
+            self.clients.pop(i, None)
+            self.hashes.pop(i, None)
+            self.logs.put(('signed_out', i))
+            self.log(f'Аккаунт {i+1}: выход выполнен. История подарков сохранена.')
+        finally:
+            self.connecting.discard(i)
 
     def start(self):
         live = self.live.get()
