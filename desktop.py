@@ -10,6 +10,7 @@ import re
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+from tkinter import font as tkfont
 from PIL import Image, ImageTk, ImageOps, ImageDraw
 
 from telethon import TelegramClient
@@ -42,6 +43,92 @@ def selected_catalog(catalog, selection):
     return [gift['id'] for gift in catalog if watcher._normalize_gift_name(gift['title']) in names]
 
 
+class WallpaperLabel(tk.Canvas):
+    """Draw text over the matching wallpaper crop instead of an opaque label."""
+    def __init__(self, app, parent, text='', textvariable=None, style='TLabel', padding=3):
+        self.app, self.text, self.variable, self.label_style = app, text, textvariable, style
+        self.padding = padding
+        self.label_font = tkfont.Font(font=ttk.Style(parent).lookup(style, 'font'))
+        value = textvariable.get() if textvariable is not None else text
+        super().__init__(parent, width=self.label_font.measure(value) + 2*padding,
+                         height=self.label_font.metrics('linespace') + 2*padding,
+                         background='#e9ecef', borderwidth=0, highlightthickness=0)
+        self.photo = None
+        self.bind('<Configure>', lambda event: self.redraw())
+        self.trace = textvariable.trace_add('write', self.text_changed) if textvariable is not None else None
+        self.bind('<Destroy>', self.cleanup)
+        app.wallpaper_labels.append(self)
+
+    def cleanup(self, event):
+        if event.widget is self and self.trace:
+            self.variable.trace_remove('write', self.trace)
+            self.trace = None
+
+    def text_changed(self, *args):
+        value = self.variable.get() if self.variable is not None else self.text
+        super().configure(width=self.label_font.measure(value) + 2*self.padding)
+        self.redraw()
+
+    def configure(self, cnf=None, **options):
+        style = options.pop('style', None)
+        if style is not None:
+            self.label_style = style
+            self.label_font.configure(**tkfont.Font(font=ttk.Style(self).lookup(style, 'font')).actual())
+        result = super().configure(cnf, **options)
+        if style is not None:
+            self.text_changed()
+        return result
+
+    def cget(self, key):
+        return self.label_style if key == 'style' else super().cget(key)
+
+    def redraw(self):
+        self.delete('all')
+        image = getattr(self.app, '_wallpaper_image', None)
+        if image is not None:
+            x = self.winfo_rootx() - self.app.root.winfo_rootx()
+            y = self.winfo_rooty() - self.app.root.winfo_rooty()
+            self.photo = ImageTk.PhotoImage(image.crop((x, y, x+self.winfo_width(), y+self.winfo_height())))
+            self.create_image(0, 0, image=self.photo, anchor='nw')
+        value = self.variable.get() if self.variable is not None else self.text
+        color = '#d94c4c' if self.label_style == 'Error.TLabel' else '#555b62' if self.label_style == 'Muted.TLabel' else '#202428'
+        self.create_text(self.padding, self.winfo_height()/2, text=value, anchor='w', fill=color, font=self.label_font, tags='caption')
+
+
+class WallpaperCheck(WallpaperLabel):
+    def __init__(self, app, parent, text, variable, command=None):
+        self.checked, self.command = variable, command
+        super().__init__(app, parent, text=text)
+        super().configure(width=self.label_font.measure(text)+38, takefocus=True)
+        self.check_trace = variable.trace_add('write', lambda *args: self.redraw())
+        self.bind('<Button-1>', lambda event: self.invoke())
+        self.bind('<space>', lambda event: self.invoke())
+        self.bind('<FocusIn>', lambda event: self.redraw())
+        self.bind('<FocusOut>', lambda event: self.redraw())
+
+    def cleanup(self, event):
+        super().cleanup(event)
+        if event.widget is self and getattr(self, 'check_trace', None):
+            self.checked.trace_remove('write', self.check_trace)
+            self.check_trace = None
+
+    def invoke(self):
+        self.focus_set()
+        self.checked.set(not self.checked.get())
+        if self.command:
+            return self.command()
+
+    def redraw(self):
+        super().redraw()
+        self.move('caption', 28, 0)
+        y = self.winfo_height()/2
+        self.create_rectangle(3, y-9, 21, y+9, fill='#f4cf4e' if self.checked.get() else '#e9ecef', outline='#b59a42')
+        if self.checked.get():
+            self.create_line(6, y, 10, y+4, 18, y-5, fill='#25282b', width=2)
+        if self.focus_get() is self:
+            self.create_rectangle(1, 1, self.winfo_width()-2, self.winfo_height()-2, outline='#6b7178', dash=(2, 2))
+
+
 class App:
     def __init__(self, root):
         self.root = root
@@ -52,21 +139,21 @@ class App:
         style.theme_use('clam')
         ui_family = 'Helvetica' if root.tk.call('tk', 'windowingsystem') == 'aqua' else 'DejaVu Sans'
         self.log_font = ('Menlo', 12) if root.tk.call('tk', 'windowingsystem') == 'aqua' else ('DejaVu Sans Mono', 11)
-        style.configure('.', font=(ui_family, 11), background='#ffffff', foreground='#243447')
-        style.configure('TFrame', background='#ffffff')
+        style.configure('.', font=(ui_family, 11), background='#e9ecef', foreground='#25282b')
+        style.configure('TFrame', background='#e9ecef')
         style.configure('TLabel', padding=3)
-        style.configure('Title.TLabel', font=(ui_family, 22, 'bold'), foreground='#2481cc')
-        style.configure('Muted.TLabel', foreground='#8293a5')
+        style.configure('Title.TLabel', font=(ui_family, 22, 'bold'), foreground='#25282b')
+        style.configure('Muted.TLabel', foreground='#61666c')
         style.configure('Error.TLabel', foreground='#d94c4c', font=(ui_family, 11, 'bold'))
         style.configure('TButton', padding=(13, 8), background='#edf4fa', borderwidth=0)
         style.map('TButton', background=[('active', '#deedf9')], foreground=[('disabled', '#64748b')])
         style.configure('Accent.TButton', background='#2481cc', foreground='#ffffff')
         style.map('Accent.TButton', background=[('active', '#1d6fb4')])
-        style.configure('TEntry', fieldbackground='#f7faff', foreground='#243447', padding=7, bordercolor='#dbe5ee', lightcolor='#dbe5ee', darkcolor='#dbe5ee')
-        style.configure('TCheckbutton', background='#ffffff', foreground='#243447', padding=4)
+        style.configure('TEntry', fieldbackground='#f7faff', foreground='#25282b', padding=7, bordercolor='#dbe5ee', lightcolor='#dbe5ee', darkcolor='#dbe5ee')
+        style.configure('TCheckbutton', background='#e9ecef', foreground='#25282b', padding=4)
         style.map('TCheckbutton', background=[('active', '#edf4fa')])
-        style.configure('TLabelframe', background='#ffffff', bordercolor='#dbe5ee')
-        style.configure('TLabelframe.Label', foreground='#8293a5')
+        style.configure('TLabelframe', background='#e9ecef', bordercolor='#dbe5ee')
+        style.configure('TLabelframe.Label', foreground='#61666c')
         self.install_control_theme(style)
         self.catalog = []
         raw_selection = read_settings(DATA / 'gifts.json', {'all': True, 'names': []})
@@ -81,6 +168,9 @@ class App:
         self.banner_resize = None
         root.configure(background='#edf3f8')
         self.background_panels = []
+        self.wallpaper_labels = []
+        self.wallpaper_canvases = []
+        self._wallpaper_image = None
         self.banner = tk.Label(root, background='#edf3f8', borderwidth=0)
         self.banner.place(x=0, y=0, relwidth=1, relheight=1)
         self.banner.lower()
@@ -106,39 +196,40 @@ class App:
         self.api_hash = tk.StringVar(value=os.getenv('TG_API_HASH', ''))
         brand = self.background_panel(root)
         brand.pack(fill='x')
-        ttk.Label(brand, text='Telegram Offers', style='Title.TLabel').pack(side='left')
+        self.wallpaper_label(brand, text='Telegram Offers', style='Title.TLabel').pack(side='left')
         self.gift_summary = tk.StringVar(value=self.selection_summary())
-        ttk.Label(brand, textvariable=self.gift_summary, style='Muted.TLabel').pack(side='left', padx=20)
+        self.wallpaper_label(brand, textvariable=self.gift_summary, style='Muted.TLabel').pack(side='left', padx=20)
         ttk.Button(brand, text='Подарки', command=self.open_gifts, style='Accent.TButton').pack(side='right', padx=5)
         ttk.Button(brand, text='Окно логов', command=self.open_logs).pack(side='right', padx=5)
         header = self.background_panel(root)
         header.pack(fill='x')
-        ttk.Label(header, text='API ID').pack(side='left')
+        self.wallpaper_label(header, text='API ID').pack(side='left')
         ttk.Entry(header, textvariable=self.api_id, width=12).pack(side='left')
-        ttk.Label(header, text='API Hash').pack(side='left', padx=10)
+        self.wallpaper_label(header, text='API Hash').pack(side='left', padx=10)
         ttk.Entry(header, textvariable=self.api_hash, show='*', width=36).pack(side='left')
         ttk.Button(header, text='Выбрать обложку', command=self.choose_banner).pack(side='right')
         self.rows = []
         self.status_labels = [None] * 10
         self.account_cards = {}
         self.account_dialog = None
-        accounts = ttk.LabelFrame(root, text='Аккаунты', padding=12)
+        accounts = self.background_panel(root)
         accounts.pack(fill='x', padx=12, pady=8)
-        actions = ttk.Frame(accounts)
+        actions = self.background_panel(accounts)
         actions.pack(fill='x', pady=(0, 10))
         self.account_count = tk.StringVar(value='0 из 10 аккаунтов')
-        ttk.Label(actions, textvariable=self.account_count, style='Muted.TLabel').pack(side='left')
+        self.wallpaper_label(actions, textvariable=self.account_count, style='Muted.TLabel').pack(side='left')
         ttk.Button(actions, text='+ Добавить аккаунт', style='Accent.TButton', command=self.open_account).pack(side='right')
-        self.account_canvas = tk.Canvas(accounts, height=70, background='#ffffff', highlightthickness=0)
+        self.account_canvas = tk.Canvas(accounts, height=70, background='#e9ecef', highlightthickness=0)
+        self.wallpaper_canvases.append(self.account_canvas)
         scrollbar = ttk.Scrollbar(accounts, orient='vertical', command=self.account_canvas.yview)
         scrollbar.pack(side='right', fill='y')
         self.account_canvas.pack(fill='x')
-        self.account_canvas.configure(yscrollcommand=scrollbar.set)
-        self.accounts_body = ttk.Frame(self.account_canvas)
+        self.account_canvas.configure(yscrollcommand=lambda first, last: (scrollbar.set(first, last), self.schedule_banner(None)))
+        self.accounts_body = self.background_panel(self.account_canvas)
         self.accounts_item = self.account_canvas.create_window(0, 0, window=self.accounts_body, anchor='nw')
         self.account_canvas.bind('<Configure>', lambda event: self.account_canvas.itemconfigure(self.accounts_item, width=event.width))
         self.accounts_body.bind('<Configure>', lambda event: self.resize_accounts())
-        self.empty_accounts = ttk.Label(self.accounts_body, text='Добавьте первый аккаунт, чтобы начать.', style='Muted.TLabel', padding=18)
+        self.empty_accounts = self.wallpaper_label(self.accounts_body, text='Добавьте первый аккаунт, чтобы начать.', style='Muted.TLabel', padding=18)
         self.empty_accounts.pack(fill='x')
         for i in range(10):
             status = tk.StringVar(value='● PeerFloodError' if i in self.restricted_accounts else 'Сохранённая сессия')
@@ -149,17 +240,18 @@ class App:
         controls = self.background_panel(root)
         controls.pack(fill='x')
         self.live = tk.BooleanVar(value=False)
-        ttk.Checkbutton(controls, text='Отправлять владельцам (выключено = предпросмотр)', variable=self.live).pack(side='left')
+        WallpaperCheck(self, controls, text='Отправлять владельцам (выключено = предпросмотр)', variable=self.live).pack(side='left')
         ttk.Button(controls, text='Запустить', command=self.start, style='Accent.TButton').pack(side='left', padx=10)
         ttk.Button(controls, text='Пауза / продолжить', command=lambda: self.loop.call_soon_threadsafe(self.pause)).pack(side='left')
         ttk.Button(controls, text='Остановить', style='Danger.TButton', command=lambda: self.loop.call_soon_threadsafe(self.stop)).pack(side='left', padx=6)
-        journal = ttk.LabelFrame(root, text='Журнал • время / статус / аккаунт / получатель', padding=8)
+        journal = self.background_panel(root)
         journal.pack(fill='both', expand=True, padx=10, pady=10)
-        toolbar = ttk.Frame(journal)
+        self.wallpaper_label(journal, text='Журнал событий', style='Muted.TLabel').pack(anchor='w')
+        toolbar = self.background_panel(journal)
         toolbar.pack(fill='x', pady=(0, 6))
         self.follow = tk.BooleanVar(value=True)
-        ttk.Checkbutton(toolbar, text='Следить за новыми событиями', variable=self.follow).pack(side='left')
-        ttk.Label(toolbar, text='Зелёный — отправлено • голубой — предложение • красный — ошибка').pack(side='left', padx=12)
+        WallpaperCheck(self, toolbar, text='Следить за новыми событиями', variable=self.follow).pack(side='left')
+        self.wallpaper_label(toolbar, text='Зелёный — отправлено • голубой — предложение • красный — ошибка').pack(side='left', padx=12)
         ttk.Button(toolbar, text='Очистить окно', command=self.clear_log).pack(side='right')
         body = ttk.Frame(journal)
         body.pack(fill='both', expand=True)
@@ -186,16 +278,17 @@ class App:
         if i in self.account_cards:
             return
         self.empty_accounts.pack_forget()
-        card = ttk.Frame(self.accounts_body, padding=(8, 8))
+        card = self.background_panel(self.accounts_body)
         self.account_cards[i] = card
-        avatar = tk.Canvas(card, width=38, height=38, background='#ffffff', highlightthickness=0)
-        avatar.create_oval(1, 1, 37, 37, fill='#2481cc', outline='')
-        avatar.create_text(19, 19, text=str(i+1), fill='#ffffff', font=('Helvetica', 13, 'bold'))
+        avatar = tk.Canvas(card, width=38, height=38, background='#e9ecef', highlightthickness=0)
+        self.wallpaper_canvases.append(avatar)
+        avatar.create_oval(1, 1, 37, 37, fill='#f4cf4e', outline='')
+        avatar.create_text(19, 19, text=str(i+1), fill='#25282b', font=('Helvetica', 13, 'bold'))
         avatar.pack(side='left', padx=(0, 10))
-        details = ttk.Frame(card)
+        details = self.background_panel(card)
         details.pack(side='left', fill='x', expand=True)
-        ttk.Label(details, text=f'Аккаунт {i+1}').pack(anchor='w')
-        label = self.status_labels[i] = ttk.Label(details, textvariable=self.rows[i][3],
+        self.wallpaper_label(details, text=f'Аккаунт {i+1}').pack(anchor='w')
+        label = self.status_labels[i] = self.wallpaper_label(details, textvariable=self.rows[i][3],
                                                 style='Error.TLabel' if i in self.restricted_accounts else 'Muted.TLabel')
         label.pack(anchor='w')
         ttk.Button(card, text='Подключить', command=lambda: self.open_account(i)).pack(side='left', padx=5)
@@ -220,7 +313,7 @@ class App:
         window.title(f'Добавить аккаунт • слот {i+1}')
         window.geometry('440x430')
         window.resizable(False, False)
-        window.configure(background='#ffffff')
+        window.configure(background='#e9ecef')
         body = ttk.Frame(window, padding=24)
         body.pack(fill='both', expand=True)
         ttk.Label(body, text='Вход в Telegram', style='Title.TLabel').pack(anchor='w', pady=(0, 8))
@@ -249,35 +342,35 @@ class App:
             self.control_images.append(value)
             return value
         for name, colors in {
-            'TButton': ('#edf4fa', '#deedf9', '#cfe4f5'),
-            'Accent.TButton': ('#2481cc', '#3495de', '#1d6fb4'),
-            'Danger.TButton': ('#fff1f1', '#ffe4e4', '#ffd5d5'),
+            'TButton': ('#f4cf4e', '#ffe080', '#dfb838'),
+            'Accent.TButton': ('#f8d354', '#ffe58c', '#e3bc3f'),
+            'Danger.TButton': ('#eed06b', '#ffe59b', '#d9b64c'),
         }.items():
             images = []
             for color in (*colors, '#edf1f5'):
                 image = Image.new('RGBA', (64, 42))
                 draw = ImageDraw.Draw(image)
-                draw.rounded_rectangle((1, 1, 62, 38), radius=8, fill=color, outline='#dbe5ee', width=1)
+                draw.rounded_rectangle((1, 1, 62, 38), radius=18, fill=color, outline='#d1b24f', width=1)
                 images.append(photo(image))
             element = 'Offers.' + name + '.face'
             style.element_create(element, 'image', images[0], ('disabled', images[3]),
                                  ('pressed', images[2]), ('active', images[1]),
-                                 border=(13, 13, 13, 13), sticky='nsew')
+                                 border=(19, 19, 19, 19), sticky='nsew')
             style.layout(name, [(element, {'sticky': 'nsew', 'children': [
                 ('Button.padding', {'sticky': 'nsew', 'children': [
                     ('Button.focus', {'sticky': 'nsew', 'children': [
                         ('Button.label', {'sticky': 'nsew'})]})]})]})])
-            style.configure(name, padding=(13, 8), foreground='#ffffff' if name == 'Accent.TButton' else '#d94c4c' if name == 'Danger.TButton' else '#2481cc', borderwidth=0)
+            style.configure(name, padding=(13, 8), foreground='#25282b', borderwidth=0)
             style.map(name, foreground=[('disabled', '#64748b')])
         indicators = []
         for selected, active in ((False, False), (True, False), (False, True)):
             image = Image.new('RGBA', (26, 24))
             draw = ImageDraw.Draw(image)
             draw.rounded_rectangle((1, 2, 20, 21), radius=5,
-                                   fill='#2481cc' if selected else '#edf4fa' if active else '#ffffff',
-                                   outline='#2481cc' if selected or active else '#64748b', width=1)
+                                   fill='#f4cf4e' if selected else '#f5e8b8' if active else '#e9ecef',
+                                   outline='#b59a42' if selected or active else '#888d92', width=1)
             if selected:
-                draw.line((5, 11, 9, 15, 16, 7), fill='#ffffff', width=3, joint='curve')
+                draw.line((5, 11, 9, 15, 16, 7), fill='#25282b', width=3, joint='curve')
             indicators.append(photo(image))
         style.element_create('Offers.Check.indicator', 'image', indicators[0],
                              ('selected', indicators[1]), ('active', indicators[2]), sticky='w')
@@ -297,7 +390,7 @@ class App:
         window = self.gifts_window = tk.Toplevel(self.root)
         window.title('Подарки • выбор коллекций')
         window.geometry('490x620')
-        window.configure(background='#ffffff')
+        window.configure(background='#e9ecef')
         controls = ttk.Frame(window, padding=12)
         controls.pack(fill='x')
         self.gifts_all = tk.BooleanVar(value=self.gift_selection['all'])
@@ -310,7 +403,7 @@ class App:
         search = ttk.Entry(controls, textvariable=self.gift_search)
         search.pack(fill='x', pady=(0, 6))
         self.gift_search.trace_add('write', lambda *args: self.render_gifts())
-        canvas = tk.Canvas(window, background='#ffffff', highlightthickness=0)
+        canvas = tk.Canvas(window, background='#e9ecef', highlightthickness=0)
         scrollbar = ttk.Scrollbar(window, orient='vertical', command=canvas.yview)
         scrollbar.pack(side='right', fill='y')
         canvas.pack(fill='both', expand=True, padx=12)
@@ -384,7 +477,7 @@ class App:
         controls.pack(fill='x')
         ttk.Checkbutton(controls, text='Автопрокрутка', variable=self.follow).pack(side='left')
         ttk.Button(controls, text='Очистить журнал', command=self.clear_log).pack(side='right')
-        text = self.detached_output = tk.Text(window, background='#ffffff', foreground='#34465a', font=self.log_font, wrap='word', state='disabled', padx=14, pady=12, relief='flat', spacing3=6)
+        text = self.detached_output = tk.Text(window, background='#e9ecef', foreground='#34465a', font=self.log_font, wrap='word', state='disabled', padx=14, pady=12, relief='flat', spacing3=6)
         scrollbar = ttk.Scrollbar(window, command=text.yview)
         scrollbar.pack(side='right', fill='y')
         text.configure(yscrollcommand=scrollbar.set)
@@ -428,6 +521,9 @@ class App:
         frame.bind('<Configure>', self.schedule_banner)
         return frame
 
+    def wallpaper_label(self, parent, **options):
+        return WallpaperLabel(self, parent, **options)
+
     def schedule_banner(self, event):
         if self.banner_resize is not None:
             self.root.after_cancel(self.banner_resize)
@@ -454,18 +550,28 @@ class App:
         self.banner_resize = None
         width = max(1, self.root.winfo_width())
         height = max(1, self.root.winfo_height())
-        if self.banner_source is None:
-            return
-        image = ImageOps.fit(self.banner_source, (width, height), Image.Resampling.LANCZOS)
-        image = Image.blend(image, Image.new('RGB', image.size, '#ffffff'), 0.68)
+        image = ImageOps.fit(self.banner_source, (width, height), Image.Resampling.LANCZOS) if self.banner_source is not None else Image.new('RGB', (width, height), '#e9ecef')
+        self._wallpaper_image = image
         self.banner_photo = ImageTk.PhotoImage(image)
         self.banner.configure(image=self.banner_photo)
+        self.background_panels = [(frame, background) for frame, background in self.background_panels if frame.winfo_exists()]
         for frame, background in self.background_panels:
             x = frame.winfo_rootx() - self.root.winfo_rootx()
             y = frame.winfo_rooty() - self.root.winfo_rooty()
             section = image.crop((x, y, x + frame.winfo_width(), y + frame.winfo_height()))
             background.photo = ImageTk.PhotoImage(section)
             background.configure(image=background.photo)
+        self.wallpaper_labels = [label for label in self.wallpaper_labels if label.winfo_exists()]
+        for label in self.wallpaper_labels:
+            label.redraw()
+        self.wallpaper_canvases = [canvas for canvas in self.wallpaper_canvases if canvas.winfo_exists()]
+        for canvas in self.wallpaper_canvases:
+            x = canvas.winfo_rootx() - self.root.winfo_rootx()
+            y = canvas.winfo_rooty() - self.root.winfo_rooty()
+            canvas.wallpaper_photo = ImageTk.PhotoImage(image.crop((x, y, x+canvas.winfo_width(), y+canvas.winfo_height())))
+            canvas.delete('wallpaper')
+            canvas.create_image(0, 0, image=canvas.wallpaper_photo, anchor='nw', tags='wallpaper')
+            canvas.tag_lower('wallpaper')
 
     def log(self, text):
         level = 'info'
