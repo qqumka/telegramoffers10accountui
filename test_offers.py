@@ -46,9 +46,9 @@ class Commands(unittest.TestCase):
             store.db.close()
 
     def test_discount_and_currency(self):
-        self.assertEqual(command('Mirage Lamp', 333, '100 XTR'), 'jdcsnjdc Mirage Lamp #333 95 stars')
-        self.assertIn(' 95 stars', command('Mirage Lamp', 333, '101 XTR'))
-        self.assertEqual(command('Mirage Lamp', 333, '400 XTR'), 'jdcsnjdc Mirage Lamp #333 380 stars')
+        self.assertEqual(command('Mirage Lamp', 333, '100 XTR'), 'jdcsnjdc Mirage Lamp #333 95 stars ru')
+        self.assertIn(' 95 stars ru', command('Mirage Lamp', 333, '101 XTR'))
+        self.assertEqual(command('Mirage Lamp', 333, '400 XTR'), 'jdcsnjdc Mirage Lamp #333 380 stars ru')
         for price in ('1.0000 TON', '—', '0 XTR', '10 XTR / 20 XTR', '1.0000 TON / 200 XTR'):
             with self.subTest(price=price), self.assertRaises(ValueError):
                 command('Mirage Lamp', 333, price)
@@ -83,7 +83,7 @@ class Integration(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(client.call_args.args[0].stars_only)
         self.assertEqual([gift['slug'] for gift in listings], ['Gift-0'])
         self.assertEqual(listings[0]['price'], '400 XTR')
-        self.assertEqual(command(listings[0]['title'], listings[0]['num'], listings[0]['price']), 'jdcsnjdc Mirage Lamp #333 380 stars')
+        self.assertEqual(command(listings[0]['title'], listings[0]['num'], listings[0]['price']), 'jdcsnjdc Mirage Lamp #333 380 stars ru')
         self.assertNotIn('Gift-1', seen)
 
     async def test_logout_removes_only_selected_account_after_confirmation(self):
@@ -132,7 +132,7 @@ class Integration(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(asyncio.CancelledError):
                         await app.scan(True)
                     i = final_pass - 1
-                    client.send_message.assert_awaited_once_with(f'owner{i}', 'jdcsnjdc Mirage Lamp #333 95 stars', parse_mode=None)
+                    client.send_message.assert_awaited_once_with(f'owner{i}', 'jdcsnjdc Mirage Lamp #333 95 stars ru', parse_mode=None)
                     self.assertEqual(resolve.await_count, 1)
                     store = OfferStore(Path(folder) / 'offers.sqlite')
                     self.assertEqual(store.db.execute('SELECT COUNT(*) FROM baseline_gifts').fetchone()[0], final_pass - 1)
@@ -168,7 +168,7 @@ class Integration(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(asyncio.CancelledError):
                         await app.scan(True)
                     self.assertEqual(resolve.await_count, 2)
-                    client.send_message.assert_awaited_once_with('owner', 'jdcsnjdc Mirage Lamp #333 95 stars', parse_mode=None)
+                    client.send_message.assert_awaited_once_with('owner', 'jdcsnjdc Mirage Lamp #333 95 stars ru', parse_mode=None)
 
     async def test_floodwait_during_scanning_stops_all_accounts(self):
         app = desktop.App.__new__(desktop.App)
@@ -230,7 +230,7 @@ class Integration(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(clients[0].send_message.await_count, 1 if same_owner else 2)
                 self.assertEqual(clients[1].send_message.await_count, 0 if same_owner else 1)
                 if not same_owner:
-                    self.assertEqual(clients[1].send_message.call_args.args, ('owner1', 'jdcsnjdc Mirage Lamp #333 95 stars'))
+                    self.assertEqual(clients[1].send_message.call_args.args, ('owner1', 'jdcsnjdc Mirage Lamp #333 95 stars ru'))
             else:
                 for client in clients.values():
                     client.send_message.assert_not_awaited()
