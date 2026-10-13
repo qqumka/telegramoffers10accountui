@@ -1,5 +1,7 @@
 """Desktop tracker and round-robin offer sender. No group or bot required."""
 import asyncio
+from collections import deque
+import json
 from datetime import datetime
 import os
 from pathlib import Path
@@ -11,7 +13,7 @@ from tkinter import ttk, messagebox, filedialog
 from PIL import Image, ImageTk, ImageOps
 
 from telethon import TelegramClient
-from telethon.errors import FloodWaitError, SessionPasswordNeededError, ApiIdInvalidError
+from telethon.errors import FloodWaitError, SessionPasswordNeededError, ApiIdInvalidError, PeerFloodError
 import watcher_core as watcher
 from offers import OfferStore, command
 
@@ -20,11 +22,59 @@ DATA = ROOT / 'data'
 DATA.mkdir(exist_ok=True)
 
 
+def read_settings(path, default):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return default
+
+
+def write_settings(path, value):
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
+    temporary.replace(path)
+
+
+def selected_catalog(catalog, selection):
+    if selection['all']:
+        return [gift['id'] for gift in catalog]
+    names = {watcher._normalize_gift_name(name) for name in selection['names']}
+    return [gift['id'] for gift in catalog if watcher._normalize_gift_name(gift['title']) in names]
+
+
 class App:
     def __init__(self, root):
         self.root = root
         root.title('Telegram Gifts — 10 аккаунтов')
-        root.geometry('1050x880')
+        root.geometry('1180x880')
+        root.minsize(1060, 720)
+        style = ttk.Style(root)
+        style.theme_use('clam')
+        ui_family = 'Helvetica' if root.tk.call('tk', 'windowingsystem') == 'aqua' else 'DejaVu Sans'
+        self.log_font = ('Menlo', 12) if root.tk.call('tk', 'windowingsystem') == 'aqua' else ('DejaVu Sans Mono', 11)
+        style.configure('.', font=(ui_family, 11), background='#152033', foreground='#e2e8f0')
+        style.configure('TFrame', background='#152033')
+        style.configure('TLabel', padding=3)
+        style.configure('Title.TLabel', font=(ui_family, 22, 'bold'), foreground='#5eead4')
+        style.configure('Muted.TLabel', foreground='#94a3b8')
+        style.configure('Error.TLabel', foreground='#fb7185', font=(ui_family, 11, 'bold'))
+        style.configure('TButton', padding=(10, 7), background='#26374e', borderwidth=0)
+        style.map('TButton', background=[('active', '#39516e')], foreground=[('disabled', '#64748b')])
+        style.configure('Accent.TButton', background='#0f766e', foreground='#ffffff')
+        style.map('Accent.TButton', background=[('active', '#115e59')])
+        style.configure('TEntry', fieldbackground='#0b1424', foreground='#f1f5f9', padding=5)
+        style.configure('TCheckbutton', background='#152033', foreground='#e2e8f0', padding=4)
+        style.map('TCheckbutton', background=[('active', '#26374e')])
+        style.configure('TLabelframe', background='#152033', bordercolor='#334155')
+        style.configure('TLabelframe.Label', foreground='#94a3b8')
+        self.catalog = []
+        raw_selection = read_settings(DATA / 'gifts.json', {'all': True, 'names': []})
+        self.gift_selection = raw_selection if isinstance(raw_selection, dict) and isinstance(raw_selection.get('all'), bool) and isinstance(raw_selection.get('names'), list) and all(isinstance(name, str) for name in raw_selection['names']) else {'all': True, 'names': []}
+        raw_limits = read_settings(DATA / 'account_limits.json', [])
+        self.restricted_accounts = {i for i in raw_limits if type(i) is int and 0 <= i < 10} if isinstance(raw_limits, list) else set()
+        self.log_history = deque(maxlen=5000)
+        self.log_window = None
+        self.detached_output = None
         self.banner_source = None
         self.banner_photo = None
         self.banner_resize = None
@@ -53,6 +103,13 @@ class App:
         self.paused = False
         self.api_id = tk.StringVar(value=os.getenv('TG_API_ID', ''))
         self.api_hash = tk.StringVar(value=os.getenv('TG_API_HASH', ''))
+        brand = self.background_panel(root)
+        brand.pack(fill='x')
+        ttk.Label(brand, text='Telegram Offers', style='Title.TLabel').pack(side='left')
+        self.gift_summary = tk.StringVar(value=self.selection_summary())
+        ttk.Label(brand, textvariable=self.gift_summary, style='Muted.TLabel').pack(side='left', padx=20)
+        ttk.Button(brand, text='Подарки', command=self.open_gifts, style='Accent.TButton').pack(side='right', padx=5)
+        ttk.Button(brand, text='Окно логов', command=self.open_logs).pack(side='right', padx=5)
         header = self.background_panel(root)
         header.pack(fill='x')
         ttk.Label(header, text='API ID').pack(side='left')
@@ -63,24 +120,29 @@ class App:
         self.rows = []
         panel = self.background_panel(root)
         panel.pack(fill='x')
+        self.status_labels = []
+        for column, text in enumerate(('Аккаунт', 'Телефон', 'Подключение', 'Код', 'Пароль 2FA', '', 'Статус', '')):
+            ttk.Label(panel, text=text, style='Muted.TLabel').grid(row=0, column=column, sticky='w', padx=4, pady=(0, 6))
         for i in range(10):
             phone, code, password = tk.StringVar(), tk.StringVar(), tk.StringVar()
-            status = tk.StringVar(value='Не подключён')
+            status = tk.StringVar(value='● PeerFloodError' if i in self.restricted_accounts else 'Не подключён')
             self.rows.append((phone, code, password, status))
-            ttk.Label(panel, text=f'Аккаунт {i+1}').grid(row=i, column=0, padx=5)
-            ttk.Entry(panel, textvariable=phone, width=18).grid(row=i, column=1)
-            ttk.Button(panel, text='Получить код / сессия', command=lambda n=i: self.connect(n)).grid(row=i, column=2)
-            ttk.Entry(panel, textvariable=code, width=10).grid(row=i, column=3)
-            ttk.Entry(panel, textvariable=password, show='*', width=15).grid(row=i, column=4)
-            ttk.Button(panel, text='Войти', command=lambda n=i: self.login(n)).grid(row=i, column=5)
-            ttk.Label(panel, textvariable=status, width=25).grid(row=i, column=6)
-            ttk.Button(panel, text='Выйти', command=lambda n=i: self.logout(n)).grid(row=i, column=7, padx=4)
-        ttk.Label(panel, text='Поля: телефон • код Telegram • пароль 2FA (если нужен)').grid(row=10, column=0, columnspan=8, pady=8)
+            ttk.Label(panel, text=f'Аккаунт {i+1}').grid(row=i+1, column=0, padx=5, pady=3)
+            ttk.Entry(panel, textvariable=phone, width=18).grid(row=i+1, column=1, pady=3)
+            ttk.Button(panel, text='Получить код / сессия', command=lambda n=i: self.connect(n)).grid(row=i+1, column=2, pady=3)
+            ttk.Entry(panel, textvariable=code, width=10).grid(row=i+1, column=3, pady=3)
+            ttk.Entry(panel, textvariable=password, show='*', width=15).grid(row=i+1, column=4, pady=3)
+            ttk.Button(panel, text='Войти', command=lambda n=i: self.login(n)).grid(row=i+1, column=5, pady=3)
+            status_label = ttk.Label(panel, textvariable=status, width=23, style='Error.TLabel' if i in self.restricted_accounts else 'TLabel')
+            status_label.grid(row=i+1, column=6, padx=6, pady=3)
+            self.status_labels.append(status_label)
+            ttk.Button(panel, text='Выйти', command=lambda n=i: self.logout(n)).grid(row=i+1, column=7, padx=4, pady=3)
+        ttk.Label(panel, text='Поля: телефон • код Telegram • пароль 2FA (если нужен)').grid(row=11, column=0, columnspan=8, pady=8)
         controls = self.background_panel(root)
         controls.pack(fill='x')
         self.live = tk.BooleanVar(value=False)
         ttk.Checkbutton(controls, text='Отправлять владельцам (выключено = предпросмотр)', variable=self.live).pack(side='left')
-        ttk.Button(controls, text='Запустить', command=self.start).pack(side='left', padx=10)
+        ttk.Button(controls, text='Запустить', command=self.start, style='Accent.TButton').pack(side='left', padx=10)
         ttk.Button(controls, text='Пауза / продолжить', command=lambda: self.loop.call_soon_threadsafe(self.pause)).pack(side='left')
         ttk.Button(controls, text='Остановить', command=lambda: self.loop.call_soon_threadsafe(self.stop)).pack(side='left')
         journal = ttk.LabelFrame(root, text='Журнал • время / статус / аккаунт / получатель', padding=8)
@@ -95,7 +157,7 @@ class App:
         body.pack(fill='both', expand=True)
         self.output = tk.Text(body, wrap='word', state='disabled', background='#111827',
                               foreground='#d1d5db', selectbackground='#334155',
-                              font=('Menlo', 12), relief='flat', padx=12, pady=10,
+                              font=self.log_font, relief='flat', padx=12, pady=10,
                               spacing1=4, spacing3=6)
         scroll = ttk.Scrollbar(body, orient='vertical', command=self.output.yview)
         self.output.configure(yscrollcommand=scroll.set)
@@ -107,6 +169,139 @@ class App:
         root.after(100, self.drain)
         root.after_idle(self.draw_banner)
         root.protocol('WM_DELETE_WINDOW', self.close)
+
+    def selection_summary(self):
+        return 'Все коллекции • только Stars' if self.gift_selection['all'] else f"Выбрано: {len(self.gift_selection['names'])} • только Stars"
+
+    def open_gifts(self):
+        existing = getattr(self, 'gifts_window', None)
+        if existing and existing.winfo_exists():
+            existing.lift()
+            return
+        window = self.gifts_window = tk.Toplevel(self.root)
+        window.title('Подарки • выбор коллекций')
+        window.geometry('490x620')
+        window.configure(background='#152033')
+        controls = ttk.Frame(window, padding=12)
+        controls.pack(fill='x')
+        self.gifts_all = tk.BooleanVar(value=self.gift_selection['all'])
+        self.gift_vars = {name: tk.BooleanVar(value=True) for name in self.gift_selection['names']}
+        ttk.Checkbutton(controls, text='Все коллекции Telegram', variable=self.gifts_all, command=self.toggle_all_gifts).pack(anchor='w')
+        ttk.Button(controls, text='Обновить каталог Telegram', command=self.refresh_catalog).pack(fill='x', pady=8)
+        ttk.Label(controls, text='Изменения действуют со следующего запуска.', style='Muted.TLabel').pack(anchor='w')
+        ttk.Label(controls, text='Поиск коллекции', style='Muted.TLabel').pack(anchor='w', pady=(8, 0))
+        self.gift_search = tk.StringVar()
+        search = ttk.Entry(controls, textvariable=self.gift_search)
+        search.pack(fill='x', pady=(0, 6))
+        self.gift_search.trace_add('write', lambda *args: self.render_gifts())
+        canvas = tk.Canvas(window, background='#152033', highlightthickness=0)
+        scrollbar = ttk.Scrollbar(window, orient='vertical', command=canvas.yview)
+        scrollbar.pack(side='right', fill='y')
+        canvas.pack(fill='both', expand=True, padx=12)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        self.gift_list = ttk.Frame(canvas)
+        item = canvas.create_window(0, 0, window=self.gift_list, anchor='nw')
+        canvas.bind('<Configure>', lambda event: canvas.itemconfigure(item, width=event.width))
+        self.gift_list.bind('<Configure>', lambda event: canvas.configure(scrollregion=canvas.bbox('all')))
+        ttk.Button(window, text='Сохранить выбор', style='Accent.TButton', command=self.save_gifts).pack(fill='x', padx=12, pady=12)
+        self.render_gifts()
+        self.refresh_catalog()
+
+    def render_gifts(self):
+        window = getattr(self, 'gifts_window', None)
+        if not window or not window.winfo_exists():
+            return
+        names = sorted(set(watcher.GIFT_NAME_WHITELIST) | {gift['title'] for gift in self.catalog} | set(self.gift_vars), key=str.lower)
+        for child in self.gift_list.winfo_children():
+            child.destroy()
+        for name in names:
+            if name not in self.gift_vars:
+                self.gift_vars[name] = tk.BooleanVar(value=self.gifts_all.get())
+            if self.gift_search.get().strip().lower() not in name.lower():
+                continue
+            ttk.Checkbutton(self.gift_list, text=name, variable=self.gift_vars[name], command=lambda: self.gifts_all.set(False)).pack(anchor='w', fill='x', pady=2)
+
+    def toggle_all_gifts(self):
+        for variable in self.gift_vars.values():
+            variable.set(self.gifts_all.get())
+
+    def save_gifts(self):
+        selection = {'all': self.gifts_all.get(), 'names': sorted(name for name, variable in self.gift_vars.items() if variable.get())}
+        try:
+            write_settings(DATA / 'gifts.json', selection)
+        except OSError:
+            messagebox.showerror('Подарки', 'Не удалось сохранить выбор коллекций.')
+            return
+        self.gift_selection = selection
+        self.gift_summary.set(self.selection_summary())
+        self.log('Настройки подарков сохранены. Для применения остановите и запустите сканирование.')
+        self.gifts_window.destroy()
+
+    def refresh_catalog(self):
+        async def run():
+            if self.task and not self.task.done():
+                self.log('Каталог: остановите сканирование перед обновлением списка')
+                return
+            for i, client in sorted(self.clients.items()):
+                if i in self.restricted_accounts or i in self.connecting:
+                    continue
+                if await client.is_user_authorized():
+                    try:
+                        catalog = await watcher.get_gift_catalog(client)
+                    except PeerFloodError:
+                        self.mark_peer_flood(i)
+                        return
+                    self.logs.put(('catalog', catalog))
+                    self.log(f'Каталог обновлён: {len(catalog)} коллекций')
+                    return
+            self.log('Каталог: подключите аккаунт. Пока показан сохранённый список коллекций.')
+        self.submit(run())
+
+    def open_logs(self):
+        if self.log_window and self.log_window.winfo_exists():
+            self.log_window.lift()
+            return
+        window = self.log_window = tk.Toplevel(self.root)
+        window.title('Telegram Offers • Журнал событий')
+        window.geometry('1050x600')
+        controls = ttk.Frame(window, padding=10)
+        controls.pack(fill='x')
+        ttk.Checkbutton(controls, text='Автопрокрутка', variable=self.follow).pack(side='left')
+        ttk.Button(controls, text='Очистить журнал', command=self.clear_log).pack(side='right')
+        text = self.detached_output = tk.Text(window, background='#0b1424', foreground='#d1d5db', font=self.log_font, wrap='word', state='disabled', padx=14, pady=12, relief='flat', spacing3=6)
+        scrollbar = ttk.Scrollbar(window, command=text.yview)
+        scrollbar.pack(side='right', fill='y')
+        text.configure(yscrollcommand=scrollbar.set)
+        text.pack(fill='both', expand=True)
+        for tag in ('info', 'offer', 'success', 'warning', 'error'):
+            text.tag_configure(tag, foreground=self.output.tag_cget(tag, 'foreground'))
+        for level, line in self.log_history:
+            self.append_log(text, level, line)
+        def close():
+            self.detached_output = None
+            self.log_window = None
+            window.destroy()
+        window.protocol('WM_DELETE_WINDOW', close)
+
+    def append_log(self, widget, level, line):
+        widget.configure(state='normal')
+        widget.insert('end', line + '\n', level)
+        if int(widget.index('end-1c').split('.')[0]) > 5000:
+            widget.delete('1.0', '501.0')
+        if self.follow.get():
+            widget.see('end')
+        widget.configure(state='disabled')
+
+    def mark_peer_flood(self, i):
+        if not hasattr(self, 'restricted_accounts'):
+            self.restricted_accounts = set()
+        self.restricted_accounts.add(i)
+        self.logs.put(('status', (i, '● PeerFloodError')))
+        self.log(f'Ошибка: аккаунт {i+1} — PeerFloodError. Работа остановлена; обход через другие аккаунты не выполняется.')
+        try:
+            write_settings(DATA / 'account_limits.json', sorted(self.restricted_accounts))
+        except OSError:
+            self.log('Ошибка: не удалось сохранить отметку ограничения аккаунта')
 
     def background_panel(self, parent):
         frame = tk.Frame(parent, background='#111111', padx=10, pady=10)
@@ -173,31 +368,37 @@ class App:
             f.write(line + '\n')
 
     def clear_log(self):
-        self.output.configure(state='normal')
-        self.output.delete('1.0', 'end')
-        self.output.configure(state='disabled')
+        self.log_history.clear()
+        for widget in (self.output, self.detached_output):
+            if widget:
+                widget.configure(state='normal')
+                widget.delete('1.0', 'end')
+                widget.configure(state='disabled')
 
     def drain(self):
         while not self.logs.empty():
             kind, payload = self.logs.get()
-            if kind == 'signed_out':
+            if kind == 'catalog':
+                self.catalog = payload
+                self.render_gifts()
+            elif kind == 'signed_out':
                 i = payload
                 self.rows[i][1].set('')
                 self.rows[i][2].set('')
                 self.rows[i][3].set('Не подключён')
+                self.status_labels[i].configure(style='TLabel')
             elif kind == 'status':
                 i, text = payload
-                self.rows[i][3].set(text)
+                limited = i in self.restricted_accounts
+                self.rows[i][3].set('● PeerFloodError' if limited else text)
+                self.status_labels[i].configure(style='Error.TLabel' if limited else 'TLabel')
                 self.log(f'Аккаунт {i+1}: {text}')
             else:
                 level, line = payload
-                self.output.configure(state='normal')
-                self.output.insert('end', line + '\n', level)
-                if int(self.output.index('end-1c').split('.')[0]) > 5000:
-                    self.output.delete('1.0', '501.0')
-                if self.follow.get():
-                    self.output.see('end')
-                self.output.configure(state='disabled')
+                self.log_history.append((level, line))
+                self.append_log(self.output, level, line)
+                if self.detached_output:
+                    self.append_log(self.detached_output, level, line)
         self.root.after(100, self.drain)
 
     def submit(self, coro):
@@ -252,6 +453,9 @@ class App:
         except ApiIdInvalidError:
             self.hashes.pop(i, None)
             self.logs.put(('status', (i, 'Проверьте API ID / Hash')))
+            raise
+        except PeerFloodError:
+            self.mark_peer_flood(i)
             raise
         finally:
             self.connecting.discard(i)
@@ -308,6 +512,9 @@ class App:
                 return
             self.clients.pop(i, None)
             self.hashes.pop(i, None)
+            if i in getattr(self, 'restricted_accounts', set()):
+                self.restricted_accounts.discard(i)
+                write_settings(DATA / 'account_limits.json', sorted(self.restricted_accounts))
             self.logs.put(('signed_out', i))
             self.log(f'Аккаунт {i+1}: выход выполнен. История подарков сохранена.')
         finally:
@@ -315,6 +522,10 @@ class App:
 
     def start(self):
         live = self.live.get()
+        selection = {'all': self.gift_selection['all'], 'names': list(self.gift_selection['names'])}
+        if not selection['all'] and not selection['names']:
+            messagebox.showwarning('Подарки', 'Выберите хотя бы одну коллекцию через кнопку «Подарки».')
+            return
         if live and not messagebox.askyesno('Отправка', 'Отправлять команды владельцам подарков от подключённых аккаунтов? Убедитесь, что получатели согласны получать сообщения.'):
             return
         async def run():
@@ -322,7 +533,7 @@ class App:
                 self.log('Уже запущено; для изменения режима остановите и запустите снова')
                 return
             self.paused = False
-            self.task = asyncio.create_task(self.scan(live))
+            self.task = asyncio.create_task(self.scan(live, selection))
             self.task.add_done_callback(self.finished)
         self.submit(run())
 
@@ -340,18 +551,28 @@ class App:
         if self.task:
             self.task.cancel()
 
-    async def scan(self, live):
-        clients = {i: c for i, c in sorted(self.clients.items()) if await c.is_user_authorized()}
+    async def scan(self, live, selection=None):
+        clients = {i: c for i, c in sorted(self.clients.items()) if i not in getattr(self, 'restricted_accounts', set()) and i not in getattr(self, 'connecting', set()) and await c.is_user_authorized()}
         if not clients:
             self.log('Сначала подключите аккаунт')
             return
         primary = next(iter(clients.values()))
+        current_slot = next(iter(clients))
         store = OfferStore(DATA / ('offers.sqlite' if live else 'preview.sqlite'))
         seen = store.known_slugs()
         warming_up = True
         self.log('Режим: ' + ('ОТПРАВКА' if live else 'ПРЕДПРОСМОТР — сообщения не отправляются'))
         try:
-            if watcher.GIFT_NAME_WHITELIST:
+            if selection is not None:
+                catalog = await watcher.get_gift_catalog(primary)
+                ids = selected_catalog(catalog, selection)
+                self.logs.put(('catalog', catalog))
+                if not selection['all']:
+                    found = {watcher._normalize_gift_name(gift['title']) for gift in catalog}
+                    missing = [name for name in selection['names'] if watcher._normalize_gift_name(name) not in found]
+                    if missing:
+                        self.log('Внимание: коллекции не найдены в каталоге Telegram: ' + ', '.join(missing))
+            elif watcher.GIFT_NAME_WHITELIST:
                 ids = await watcher.get_gift_ids_by_names(primary, watcher.GIFT_NAME_WHITELIST)
             elif watcher.MANUAL_GIFT_IDS:
                 ids = watcher.MANUAL_GIFT_IDS
@@ -375,7 +596,8 @@ class App:
                 for index, gift_id in enumerate(ids):
                     while self.paused:
                         await asyncio.sleep(0.2)
-                    client = list(clients.values())[index % len(clients)]
+                    current_slot = list(clients)[index % len(clients)]
+                    client = clients[current_slot]
                     await watcher.check_gift(client, gift_id, pass_seen, listings, stats)
                     await asyncio.sleep(watcher.REQUEST_DELAY)
                 self.log(f"Рынок: получено {stats['total_seen_in_responses']} лотов • доступны за Stars {stats.get('stars_listings', 0)} • уже известны {stats.get('known_gifts', 0)} • исключены по валюте {stats.get('filtered_currency', 0)} • без ссылки {stats.get('missing_slug', 0)} • новых {len(listings)} • ошибок {stats['errors']}")
@@ -395,6 +617,7 @@ class App:
                     await asyncio.sleep(watcher.POLL_INTERVAL)
                     continue
                 listings = [listing for listing in listings if not store.seen_owner(getattr(listing['owner_id'], 'user_id', None))]
+                current_slot = next(iter(clients))
                 info = await watcher.resolve_owner_info(primary, listings) if listings else {}
                 for listing in listings:
                     while self.paused:
@@ -428,6 +651,10 @@ class App:
                         continue
                     try:
                         await clients[slot].send_message(recipient, text, parse_mode=None)
+                    except PeerFloodError:
+                        store.status(listing['slug'], 'blocked')
+                        self.mark_peer_flood(slot)
+                        return
                     except FloodWaitError as exc:
                         store.status(listing['slug'], 'blocked')
                         self.log(f'Telegram ограничил аккаунт {slot+1} на {exc.seconds} сек. Отправка остановлена; другие аккаунты не используются для обхода.')
@@ -441,6 +668,8 @@ class App:
                     await asyncio.sleep(max(1, watcher.SEND_DELAY_SECONDS))
                 self.log(f"Проход завершён: найдено {len(listings)}, ошибок запросов {stats['errors']}")
                 await asyncio.sleep(watcher.POLL_INTERVAL)
+        except PeerFloodError:
+            self.mark_peer_flood(current_slot)
         except FloodWaitError as exc:
             self.log(f'Telegram ограничил запросы на {exc.seconds} сек. Сканирование остановлено.')
         finally:
