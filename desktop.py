@@ -10,7 +10,7 @@ import re
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-from PIL import Image, ImageTk, ImageOps
+from PIL import Image, ImageTk, ImageOps, ImageDraw
 
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, SessionPasswordNeededError, ApiIdInvalidError, PeerFloodError
@@ -58,7 +58,7 @@ class App:
         style.configure('Title.TLabel', font=(ui_family, 22, 'bold'), foreground='#5eead4')
         style.configure('Muted.TLabel', foreground='#94a3b8')
         style.configure('Error.TLabel', foreground='#fb7185', font=(ui_family, 11, 'bold'))
-        style.configure('TButton', padding=(10, 7), background='#26374e', borderwidth=0)
+        style.configure('TButton', padding=(13, 8), background='#26374e', borderwidth=0)
         style.map('TButton', background=[('active', '#39516e')], foreground=[('disabled', '#64748b')])
         style.configure('Accent.TButton', background='#0f766e', foreground='#ffffff')
         style.map('Accent.TButton', background=[('active', '#115e59')])
@@ -67,6 +67,7 @@ class App:
         style.map('TCheckbutton', background=[('active', '#26374e')])
         style.configure('TLabelframe', background='#152033', bordercolor='#334155')
         style.configure('TLabelframe.Label', foreground='#94a3b8')
+        self.install_control_theme(style)
         self.catalog = []
         raw_selection = read_settings(DATA / 'gifts.json', {'all': True, 'names': []})
         self.gift_selection = raw_selection if isinstance(raw_selection, dict) and isinstance(raw_selection.get('all'), bool) and isinstance(raw_selection.get('names'), list) and all(isinstance(name, str) for name in raw_selection['names']) else {'all': True, 'names': []}
@@ -136,7 +137,7 @@ class App:
             status_label = ttk.Label(panel, textvariable=status, width=23, style='Error.TLabel' if i in self.restricted_accounts else 'TLabel')
             status_label.grid(row=i+1, column=6, padx=6, pady=3)
             self.status_labels.append(status_label)
-            ttk.Button(panel, text='Выйти', command=lambda n=i: self.logout(n)).grid(row=i+1, column=7, padx=4, pady=3)
+            ttk.Button(panel, text='Выйти', style='Danger.TButton', command=lambda n=i: self.logout(n)).grid(row=i+1, column=7, padx=4, pady=3)
         ttk.Label(panel, text='Поля: телефон • код Telegram • пароль 2FA (если нужен)').grid(row=11, column=0, columnspan=8, pady=8)
         controls = self.background_panel(root)
         controls.pack(fill='x')
@@ -144,7 +145,7 @@ class App:
         ttk.Checkbutton(controls, text='Отправлять владельцам (выключено = предпросмотр)', variable=self.live).pack(side='left')
         ttk.Button(controls, text='Запустить', command=self.start, style='Accent.TButton').pack(side='left', padx=10)
         ttk.Button(controls, text='Пауза / продолжить', command=lambda: self.loop.call_soon_threadsafe(self.pause)).pack(side='left')
-        ttk.Button(controls, text='Остановить', command=lambda: self.loop.call_soon_threadsafe(self.stop)).pack(side='left')
+        ttk.Button(controls, text='Остановить', style='Danger.TButton', command=lambda: self.loop.call_soon_threadsafe(self.stop)).pack(side='left', padx=6)
         journal = ttk.LabelFrame(root, text='Журнал • время / статус / аккаунт / получатель', padding=8)
         journal.pack(fill='both', expand=True, padx=10, pady=10)
         toolbar = ttk.Frame(journal)
@@ -169,6 +170,54 @@ class App:
         root.after(100, self.drain)
         root.after_idle(self.draw_banner)
         root.protocol('WM_DELETE_WINDOW', self.close)
+
+    def install_control_theme(self, style):
+        # Native ttk handles focus, keyboard activation and widget states;
+        # these images replace only the stock square faces and cross indicator.
+        self.control_images = []
+        def photo(image):
+            value = ImageTk.PhotoImage(image)
+            self.control_images.append(value)
+            return value
+        for name, colors in {
+            'TButton': ('#253b55', '#345775', '#192b42'),
+            'Accent.TButton': ('#0d9488', '#14b8a6', '#0f766e'),
+            'Danger.TButton': ('#632b42', '#94364e', '#492033'),
+        }.items():
+            images = []
+            for color in (*colors, '#263041'):
+                image = Image.new('RGBA', (64, 42))
+                draw = ImageDraw.Draw(image)
+                draw.rounded_rectangle((1, 3, 62, 41), radius=11, fill='#080f1c')
+                draw.rounded_rectangle((1, 1, 62, 38), radius=11, fill=color, outline='#56718b', width=1)
+                draw.line((14, 3, 49, 3), fill='#ffffff30', width=1)
+                images.append(photo(image))
+            element = 'Offers.' + name + '.face'
+            style.element_create(element, 'image', images[0], ('disabled', images[3]),
+                                 ('pressed', images[2]), ('active', images[1]),
+                                 border=(13, 13, 13, 13), sticky='nsew')
+            style.layout(name, [(element, {'sticky': 'nsew', 'children': [
+                ('Button.padding', {'sticky': 'nsew', 'children': [
+                    ('Button.focus', {'sticky': 'nsew', 'children': [
+                        ('Button.label', {'sticky': 'nsew'})]})]})]})])
+            style.configure(name, padding=(13, 8), foreground='#f8fafc', borderwidth=0)
+            style.map(name, foreground=[('disabled', '#64748b')])
+        indicators = []
+        for selected, active in ((False, False), (True, False), (False, True)):
+            image = Image.new('RGBA', (26, 24))
+            draw = ImageDraw.Draw(image)
+            draw.rounded_rectangle((1, 2, 20, 21), radius=5,
+                                   fill='#14b8a6' if selected else '#20384a' if active else '#0b1424',
+                                   outline='#5eead4' if selected or active else '#64748b', width=1)
+            if selected:
+                draw.line((5, 11, 9, 15, 16, 7), fill='#ffffff', width=3, joint='curve')
+            indicators.append(photo(image))
+        style.element_create('Offers.Check.indicator', 'image', indicators[0],
+                             ('selected', indicators[1]), ('active', indicators[2]), sticky='w')
+        style.layout('TCheckbutton', [('Checkbutton.padding', {'sticky': 'nsew', 'children': [
+            ('Offers.Check.indicator', {'side': 'left', 'sticky': 'w'}),
+            ('Checkbutton.focus', {'side': 'left', 'sticky': 'w', 'children': [
+                ('Checkbutton.label', {'sticky': 'w'})]})]})])
 
     def selection_summary(self):
         return 'Все коллекции • только Stars' if self.gift_selection['all'] else f"Выбрано: {len(self.gift_selection['names'])} • только Stars"
