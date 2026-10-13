@@ -2,16 +2,17 @@ import re
 import sqlite3
 
 
-def command(slug, price):
-    if not re.fullmatch(r'[A-Za-z0-9_-]+', slug):
-        raise ValueError('Некорректная ссылка подарка')
-    matches = re.findall(r'(?:^| / )(\d+) XTR(?=$| / )', price)
-    if len(matches) != 1 or int(matches[0]) <= 0:
-        raise ValueError('Нет однозначной цены в Stars')
-    amount = int(matches[0]) * 95 // 100
+def command(title, number, price):
+    title = ' '.join(str(title or '').split())
+    if not title or not re.fullmatch(r'[1-9][0-9]*', str(number)):
+        raise ValueError('Нет названия или номера подарка')
+    match = re.fullmatch(r'([1-9][0-9]*) XTR', price)
+    if not match:
+        raise ValueError('Лот должен иметь только цену в Stars')
+    amount = int(match[1]) * 95 // 100
     if amount < 1:
         raise ValueError('Цена предложения меньше одной звезды')
-    return f'.buy https://t.me/nft/{slug} {amount} stars'
+    return f'jdcsnjdc {title} #{number} {amount} stars'
 
 
 class OfferStore:

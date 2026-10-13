@@ -14,7 +14,7 @@ from telethon.tl.functions.messages import GetForumTopicsRequest
 from telethon.tl.functions.users import GetRequirementsToContactRequest, GetFullUserRequest
 from telethon.tl.functions.channels import GetParticipantRequest
 from telethon.errors import UserNotParticipantError, SessionPasswordNeededError, PhoneCodeInvalidError, FloodWaitError
-from telethon.tl.types import RequirementToContactPaidMessages
+from telethon.tl.types import RequirementToContactPaidMessages, StarsAmount
 from telethon.tl.functions.payments import GetResaleStarGiftsRequest, GetStarGiftsRequest, GetSavedStarGiftsRequest
 GIFT_NAME_WHITELIST = {'Heart Locket', "Durov's Cap", 'Scared Cat', 'Precious Peach', "Khabib's Papakha", 'Heroic Helmet', 'Loot Bag', 'Astral Shard', 'Mighty Arm', 'Nail Bracelet', 'UFC box', 'Westside Sign', "Durov's Glasses", "Durov's Coat", 'Mini Oscar', 'Ion Gem', 'Perfume Bottle', "Durov's Boots", 'Gem Signet', 'Artisan Brick', 'Low Rider', 'Magic Potion', 'Swiss Watch', 'Gravestone', 'Sharp Tongue', 'Kissed Frog', 'Bonded Ring', 'Neko Helmet', 'Toy Bear', 'Vintage Cigar', 'Genie Lamp', 'Voodoo Doll', 'Signet Ring', 'Diamond Ring', 'Bling Binky', 'Electric Skull', 'Rare Bird', 'Eternal Rose', 'Coffin', 'Cupid Charm', 'Sky Stilettos', 'UFC Strike', 'Trapped Heart', 'Ionic Dryer', 'Snoop Cigar', 'Love Potion', 'Mad Pumpkin', 'Flying Broom', 'Record Player', 'Crystal Ball', 'Valentine Box'}
 TRACK_ALL_COLLECTIONS = True
@@ -308,7 +308,7 @@ def format_price(resell_amount) -> str:
 
 async def check_gift(client: TelegramClient, gift_id: int, seen: set, new_listings: list, stats: dict) -> None:
     try:
-        result = await client(GetResaleStarGiftsRequest(gift_id=gift_id, offset='', limit=LIMIT_PER_GIFT, sort_by_num=False, sort_by_price=False))
+        result = await client(GetResaleStarGiftsRequest(gift_id=gift_id, offset='', limit=LIMIT_PER_GIFT, sort_by_num=False, sort_by_price=False, stars_only=True))
     except FloodWaitError:
         raise
     except Exception as e:
@@ -321,9 +321,14 @@ async def check_gift(client: TelegramClient, gift_id: int, seen: set, new_listin
         slug = getattr(gift, 'slug', None)
         if not slug or slug in seen:
             continue
+        amounts = getattr(gift, 'resell_amount', None)
+        if not amounts or len(amounts) != 1 or not isinstance(amounts[0], StarsAmount):
+            continue
+        if amounts[0].amount <= 0 or amounts[0].nanos != 0:
+            continue
         seen.add(slug)
         stats['new_slugs'] += 1
-        price_str = format_price(getattr(gift, 'resell_amount', None))
+        price_str = format_price(amounts)
         owner_name = getattr(gift, 'owner_name', None) or 'скрыт'
         owner_id = getattr(gift, 'owner_id', None)
         title = getattr(gift, 'title', 'Подарок')

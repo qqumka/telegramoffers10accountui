@@ -403,9 +403,9 @@ class App:
                         if level is not None and level > watcher.MAX_SELLER_LEVEL:
                             continue
                     try:
-                        text = command(listing['slug'], listing['price'])
+                        text = command(listing.get('title'), listing.get('num'), listing['price'])
                     except ValueError:
-                        self.log(f"Пропуск {listing['slug']}: нет подходящей цены Stars")
+                        self.log(f"Пропуск {listing['slug']}: требуется цена только в Stars, название и номер подарка")
                         continue
                     original = int(re.search(r'(?:^| / )(\d+) XTR', listing['price']).group(1))
                     if watcher.MIN_PRICE_STARS and original < watcher.MIN_PRICE_STARS:

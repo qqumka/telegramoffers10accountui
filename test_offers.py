@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 from offers import OfferStore, command
 import desktop
+from telethon.tl.types import StarsAmount, StarsTonAmount
 
 
 class Commands(unittest.TestCase):
@@ -45,12 +46,12 @@ class Commands(unittest.TestCase):
             store.db.close()
 
     def test_discount_and_currency(self):
-        self.assertEqual(command('Gift-123', '100 XTR'), '.buy https://t.me/nft/Gift-123 95 stars')
-        self.assertIn(' 95 stars', command('Gift-123', '101 XTR'))
-        self.assertIn(' 190 stars', command('Gift-123', '1.0000 TON / 200 XTR'))
-        for price in ('1.0000 TON', '—', '0 XTR', '10 XTR / 20 XTR'):
+        self.assertEqual(command('Mirage Lamp', 333, '100 XTR'), 'jdcsnjdc Mirage Lamp #333 95 stars')
+        self.assertIn(' 95 stars', command('Mirage Lamp', 333, '101 XTR'))
+        self.assertEqual(command('Mirage Lamp', 333, '400 XTR'), 'jdcsnjdc Mirage Lamp #333 380 stars')
+        for price in ('1.0000 TON', '—', '0 XTR', '10 XTR / 20 XTR', '1.0000 TON / 200 XTR'):
             with self.subTest(price=price), self.assertRaises(ValueError):
-                command('Gift-123', price)
+                command('Mirage Lamp', 333, price)
 
     def test_round_robin_persistence_and_duplicates(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -65,6 +66,26 @@ class Commands(unittest.TestCase):
 
 
 class Integration(unittest.IsolatedAsyncioTestCase):
+    async def test_parser_requests_and_accepts_only_stars(self):
+        prices = [
+            [StarsAmount(400, 0)],
+            [StarsTonAmount(1000000000)],
+            [StarsAmount(400, 0), StarsTonAmount(1000000000)],
+            [StarsAmount(400, 1)],
+            [],
+            [SimpleNamespace(amount=400)],
+        ]
+        gifts = [SimpleNamespace(slug=f'Gift-{i}', title='Mirage Lamp', num=333, resell_amount=price) for i, price in enumerate(prices)]
+        client = AsyncMock(return_value=SimpleNamespace(gifts=gifts))
+        listings, seen = [], set()
+        stats = dict(total_seen_in_responses=0, new_slugs=0, errors=0, filtered_by_name=0, filtered_names_sample=[])
+        await desktop.watcher.check_gift(client, 1, seen, listings, stats)
+        self.assertTrue(client.call_args.args[0].stars_only)
+        self.assertEqual([gift['slug'] for gift in listings], ['Gift-0'])
+        self.assertEqual(listings[0]['price'], '400 XTR')
+        self.assertEqual(command(listings[0]['title'], listings[0]['num'], listings[0]['price']), 'jdcsnjdc Mirage Lamp #333 380 stars')
+        self.assertNotIn('Gift-1', seen)
+
     async def test_logout_removes_only_selected_account_after_confirmation(self):
         for success in (True, False):
             with self.subTest(success=success):
@@ -97,7 +118,7 @@ class Integration(unittest.IsolatedAsyncioTestCase):
                         slug = f'Gift-{i}'
                         if slug not in seen:
                             seen.add(slug)
-                            listings.append(dict(slug=slug, price='100 XTR', owner_id=SimpleNamespace(user_id=100 + i), owner_name='Owner'))
+                            listings.append(dict(slug=slug, price='100 XTR', title='Mirage Lamp', num=333, owner_id=SimpleNamespace(user_id=100 + i), owner_name='Owner'))
                 async def sleep(delay):
                     nonlocal passes
                     if delay == desktop.watcher.POLL_INTERVAL:
@@ -111,7 +132,7 @@ class Integration(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(asyncio.CancelledError):
                         await app.scan(True)
                     i = final_pass - 1
-                    client.send_message.assert_awaited_once_with(f'owner{i}', f'.buy https://t.me/nft/Gift-{i} 95 stars', parse_mode=None)
+                    client.send_message.assert_awaited_once_with(f'owner{i}', 'jdcsnjdc Mirage Lamp #333 95 stars', parse_mode=None)
                     self.assertEqual(resolve.await_count, 1)
                     store = OfferStore(Path(folder) / 'offers.sqlite')
                     self.assertEqual(store.db.execute('SELECT COUNT(*) FROM baseline_gifts').fetchone()[0], final_pass - 1)
@@ -135,7 +156,7 @@ class Integration(unittest.IsolatedAsyncioTestCase):
                         return
                     if 'Retry-1' not in seen:
                         seen.add('Retry-1')
-                        listings.append(dict(slug='Retry-1', price='100 XTR', owner_id=SimpleNamespace(user_id=123), owner_name='Owner'))
+                        listings.append(dict(slug='Retry-1', price='100 XTR', title='Mirage Lamp', num=333, owner_id=SimpleNamespace(user_id=123), owner_name='Owner'))
                 async def sleep(delay):
                     nonlocal passes
                     if delay == desktop.watcher.POLL_INTERVAL:
@@ -147,7 +168,7 @@ class Integration(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(asyncio.CancelledError):
                         await app.scan(True)
                     self.assertEqual(resolve.await_count, 2)
-                    client.send_message.assert_awaited_once_with('owner', '.buy https://t.me/nft/Retry-1 95 stars', parse_mode=None)
+                    client.send_message.assert_awaited_once_with('owner', 'jdcsnjdc Mirage Lamp #333 95 stars', parse_mode=None)
 
     async def test_floodwait_during_scanning_stops_all_accounts(self):
         app = desktop.App.__new__(desktop.App)
@@ -194,7 +215,7 @@ class Integration(unittest.IsolatedAsyncioTestCase):
             if fetches == 1:
                 return
             for i in range(3):
-                listings.append(dict(slug=f'Gift-{i}', price='100 XTR', owner_id=SimpleNamespace(user_id=0 if same_owner else i), owner_name='Owner'))
+                listings.append(dict(slug=f'Gift-{i}', price='100 XTR', title='Mirage Lamp', num=333, owner_id=SimpleNamespace(user_id=0 if same_owner else i), owner_name='Owner'))
         async def sleep(delay):
             nonlocal passes
             if delay == desktop.watcher.POLL_INTERVAL:
@@ -209,7 +230,7 @@ class Integration(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(clients[0].send_message.await_count, 1 if same_owner else 2)
                 self.assertEqual(clients[1].send_message.await_count, 0 if same_owner else 1)
                 if not same_owner:
-                    self.assertEqual(clients[1].send_message.call_args.args, ('owner1', '.buy https://t.me/nft/Gift-1 95 stars'))
+                    self.assertEqual(clients[1].send_message.call_args.args, ('owner1', 'jdcsnjdc Mirage Lamp #333 95 stars'))
             else:
                 for client in clients.values():
                     client.send_message.assert_not_awaited()
