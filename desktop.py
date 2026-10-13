@@ -924,6 +924,5 @@ class App:
 
 
 if __name__ == '__main__':
-    window = tk.Tk()
-    App(window)
-    window.mainloop()
+    from ui_qt import main
+    main()
