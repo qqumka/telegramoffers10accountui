@@ -14,7 +14,7 @@ from telethon.tl.functions.messages import GetForumTopicsRequest
 from telethon.tl.functions.users import GetRequirementsToContactRequest, GetFullUserRequest
 from telethon.tl.functions.channels import GetParticipantRequest
 from telethon.errors import UserNotParticipantError, SessionPasswordNeededError, PhoneCodeInvalidError, FloodWaitError
-from telethon.tl.types import RequirementToContactPaidMessages, StarsAmount
+from telethon.tl.types import RequirementToContactPaidMessages, StarsAmount, StarsTonAmount
 from telethon.tl.functions.payments import GetResaleStarGiftsRequest, GetStarGiftsRequest, GetSavedStarGiftsRequest
 GIFT_NAME_WHITELIST = {'Heart Locket', "Durov's Cap", 'Scared Cat', 'Precious Peach', "Khabib's Papakha", 'Heroic Helmet', 'Loot Bag', 'Astral Shard', 'Mighty Arm', 'Nail Bracelet', 'UFC box', 'Westside Sign', "Durov's Glasses", "Durov's Coat", 'Mini Oscar', 'Ion Gem', 'Perfume Bottle', "Durov's Boots", 'Gem Signet', 'Artisan Brick', 'Low Rider', 'Magic Potion', 'Swiss Watch', 'Gravestone', 'Sharp Tongue', 'Kissed Frog', 'Bonded Ring', 'Neko Helmet', 'Toy Bear', 'Vintage Cigar', 'Genie Lamp', 'Voodoo Doll', 'Signet Ring', 'Diamond Ring', 'Bling Binky', 'Electric Skull', 'Rare Bird', 'Eternal Rose', 'Coffin', 'Cupid Charm', 'Sky Stilettos', 'UFC Strike', 'Trapped Heart', 'Ionic Dryer', 'Snoop Cigar', 'Love Potion', 'Mad Pumpkin', 'Flying Broom', 'Record Player', 'Crystal Ball', 'Valentine Box'}
 TRACK_ALL_COLLECTIONS = True
@@ -318,17 +318,30 @@ async def check_gift(client: TelegramClient, gift_id: int, seen: set, new_listin
     total_in_response = len(getattr(result, 'gifts', []))
     stats['total_seen_in_responses'] += total_in_response
     for gift in getattr(result, 'gifts', []):
-        slug = getattr(gift, 'slug', None)
-        if not slug or slug in seen:
-            continue
         amounts = getattr(gift, 'resell_amount', None)
-        if not amounts or len(amounts) != 1 or not isinstance(amounts[0], StarsAmount):
+        types = stats.setdefault('price_types', {})
+        for amount in amounts or []:
+            name = type(amount).__name__
+            types[name] = types.get(name, 0) + 1
+        stars = [amount for amount in amounts or [] if isinstance(amount, StarsAmount)]
+        if getattr(gift, 'resale_ton_only', False) or len(stars) != 1 or any(not isinstance(amount, (StarsAmount, StarsTonAmount)) for amount in amounts or []):
+            stats['filtered_currency'] = stats.get('filtered_currency', 0) + 1
             continue
-        if amounts[0].amount <= 0 or amounts[0].nanos != 0:
+        if stars[0].amount <= 0 or stars[0].nanos != 0:
+            stats['filtered_currency'] = stats.get('filtered_currency', 0) + 1
+            continue
+        stats['stars_listings'] = stats.get('stars_listings', 0) + 1
+        slug = getattr(gift, 'slug', None)
+        if not slug:
+            stats['missing_slug'] = stats.get('missing_slug', 0) + 1
+            continue
+        if slug in seen:
+            stats['known_gifts'] = stats.get('known_gifts', 0) + 1
             continue
         seen.add(slug)
         stats['new_slugs'] += 1
-        price_str = format_price(amounts)
+        # A Stars-enabled listing may advertise both currencies. Never convert TON.
+        price_str = format_price(stars)
         owner_name = getattr(gift, 'owner_name', None) or 'скрыт'
         owner_id = getattr(gift, 'owner_id', None)
         title = getattr(gift, 'title', 'Подарок')

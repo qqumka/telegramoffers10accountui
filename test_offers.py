@@ -81,10 +81,28 @@ class Integration(unittest.IsolatedAsyncioTestCase):
         stats = dict(total_seen_in_responses=0, new_slugs=0, errors=0, filtered_by_name=0, filtered_names_sample=[])
         await desktop.watcher.check_gift(client, 1, seen, listings, stats)
         self.assertTrue(client.call_args.args[0].stars_only)
-        self.assertEqual([gift['slug'] for gift in listings], ['Gift-0'])
+        self.assertEqual([gift['slug'] for gift in listings], ['Gift-0', 'Gift-2'])
         self.assertEqual(listings[0]['price'], '400 XTR')
         self.assertEqual(command(listings[0]['title'], listings[0]['num'], listings[0]['price']), 'jdcsnjdc Mirage Lamp #333 380 stars ru')
         self.assertNotIn('Gift-1', seen)
+        self.assertEqual(listings[1]['price'], '400 XTR')
+        self.assertEqual(stats['stars_listings'], 2)
+        self.assertEqual(stats['filtered_currency'], 4)
+        known_stats = dict(total_seen_in_responses=0, new_slugs=0, errors=0, filtered_by_name=0, filtered_names_sample=[])
+        repeated = []
+        await desktop.watcher.check_gift(client, 1, seen, repeated, known_stats)
+        self.assertEqual(repeated, [])
+        self.assertEqual(known_stats['stars_listings'], 2)
+        self.assertEqual(known_stats['known_gifts'], 2)
+
+    async def test_ton_only_flag_overrides_advertised_stars_price(self):
+        gift = SimpleNamespace(slug='Gift-1', resale_ton_only=True, resell_amount=[StarsAmount(400, 0), StarsTonAmount(1000000000)])
+        client = AsyncMock(return_value=SimpleNamespace(gifts=[gift]))
+        listings = []
+        stats = dict(total_seen_in_responses=0, new_slugs=0, errors=0)
+        await desktop.watcher.check_gift(client, 1, set(), listings, stats)
+        self.assertEqual(listings, [])
+        self.assertEqual(stats['filtered_currency'], 1)
 
     async def test_logout_removes_only_selected_account_after_confirmation(self):
         for success in (True, False):

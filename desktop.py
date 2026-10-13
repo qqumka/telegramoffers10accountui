@@ -363,6 +363,7 @@ class App:
                 self.log('Ошибка: не найдено коллекций для сканирования')
                 return
             self.log(f'Коллекций: {len(ids)}; аккаунтов: {len(clients)}')
+            self.log(f'В сохранённой истории: {len(seen)} подарков')
             self.log('Первый проход: запоминаю текущие подарки, без предложений и отправки')
             while True:
                 while self.paused:
@@ -377,6 +378,11 @@ class App:
                     client = list(clients.values())[index % len(clients)]
                     await watcher.check_gift(client, gift_id, pass_seen, listings, stats)
                     await asyncio.sleep(watcher.REQUEST_DELAY)
+                self.log(f"Рынок: получено {stats['total_seen_in_responses']} лотов • доступны за Stars {stats.get('stars_listings', 0)} • уже известны {stats.get('known_gifts', 0)} • исключены по валюте {stats.get('filtered_currency', 0)} • без ссылки {stats.get('missing_slug', 0)} • новых {len(listings)} • ошибок {stats['errors']}")
+                if stats.get('price_types'):
+                    self.log('Типы цен Telegram: ' + ', '.join(f'{name}: {count}' for name, count in sorted(stats['price_types'].items())))
+                if stats['total_seen_in_responses'] == 0 and not stats['errors']:
+                    self.log('Внимание: Telegram вернул пустые списки лотов по выбранным коллекциям. Это не означает, что весь рынок пуст.')
                 if warming_up:
                     baseline = [listing['slug'] for listing in listings]
                     store.remember_baseline(baseline)
@@ -385,7 +391,7 @@ class App:
                         self.log(f"Прогрев: запомнено {len(baseline)} подарков; ошибок {stats['errors']}. Отправка выключена до полного прохода без ошибок.")
                     else:
                         warming_up = False
-                        self.log(f'Первый проход завершён: запомнено {len(baseline)} подарков. Следующие проходы обрабатывают только новые находки.')
+                        self.log(f"Первый проход завершён: добавлено в историю {len(baseline)} новых подарков; доступны за Stars {stats.get('stars_listings', 0)}, уже известны {stats.get('known_gifts', 0)}. Следующие проходы обрабатывают только новые находки.")
                     await asyncio.sleep(watcher.POLL_INTERVAL)
                     continue
                 listings = [listing for listing in listings if not store.seen_owner(getattr(listing['owner_id'], 'user_id', None))]
