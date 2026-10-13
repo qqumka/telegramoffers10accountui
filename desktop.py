@@ -46,27 +46,27 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title('Telegram Gifts — 10 аккаунтов')
-        root.geometry('1180x880')
-        root.minsize(1060, 720)
+        root.geometry('1080x760')
+        root.minsize(1000, 640)
         style = ttk.Style(root)
         style.theme_use('clam')
         ui_family = 'Helvetica' if root.tk.call('tk', 'windowingsystem') == 'aqua' else 'DejaVu Sans'
         self.log_font = ('Menlo', 12) if root.tk.call('tk', 'windowingsystem') == 'aqua' else ('DejaVu Sans Mono', 11)
-        style.configure('.', font=(ui_family, 11), background='#152033', foreground='#e2e8f0')
-        style.configure('TFrame', background='#152033')
+        style.configure('.', font=(ui_family, 11), background='#ffffff', foreground='#243447')
+        style.configure('TFrame', background='#ffffff')
         style.configure('TLabel', padding=3)
-        style.configure('Title.TLabel', font=(ui_family, 22, 'bold'), foreground='#5eead4')
-        style.configure('Muted.TLabel', foreground='#94a3b8')
-        style.configure('Error.TLabel', foreground='#fb7185', font=(ui_family, 11, 'bold'))
-        style.configure('TButton', padding=(13, 8), background='#26374e', borderwidth=0)
-        style.map('TButton', background=[('active', '#39516e')], foreground=[('disabled', '#64748b')])
-        style.configure('Accent.TButton', background='#0f766e', foreground='#ffffff')
-        style.map('Accent.TButton', background=[('active', '#115e59')])
-        style.configure('TEntry', fieldbackground='#0b1424', foreground='#f1f5f9', padding=5)
-        style.configure('TCheckbutton', background='#152033', foreground='#e2e8f0', padding=4)
-        style.map('TCheckbutton', background=[('active', '#26374e')])
-        style.configure('TLabelframe', background='#152033', bordercolor='#334155')
-        style.configure('TLabelframe.Label', foreground='#94a3b8')
+        style.configure('Title.TLabel', font=(ui_family, 22, 'bold'), foreground='#2481cc')
+        style.configure('Muted.TLabel', foreground='#8293a5')
+        style.configure('Error.TLabel', foreground='#d94c4c', font=(ui_family, 11, 'bold'))
+        style.configure('TButton', padding=(13, 8), background='#edf4fa', borderwidth=0)
+        style.map('TButton', background=[('active', '#deedf9')], foreground=[('disabled', '#64748b')])
+        style.configure('Accent.TButton', background='#2481cc', foreground='#ffffff')
+        style.map('Accent.TButton', background=[('active', '#1d6fb4')])
+        style.configure('TEntry', fieldbackground='#f7faff', foreground='#243447', padding=7, bordercolor='#dbe5ee', lightcolor='#dbe5ee', darkcolor='#dbe5ee')
+        style.configure('TCheckbutton', background='#ffffff', foreground='#243447', padding=4)
+        style.map('TCheckbutton', background=[('active', '#edf4fa')])
+        style.configure('TLabelframe', background='#ffffff', bordercolor='#dbe5ee')
+        style.configure('TLabelframe.Label', foreground='#8293a5')
         self.install_control_theme(style)
         self.catalog = []
         raw_selection = read_settings(DATA / 'gifts.json', {'all': True, 'names': []})
@@ -79,9 +79,9 @@ class App:
         self.banner_source = None
         self.banner_photo = None
         self.banner_resize = None
-        root.configure(background='#111111')
+        root.configure(background='#edf3f8')
         self.background_panels = []
-        self.banner = tk.Label(root, background='#111111', borderwidth=0)
+        self.banner = tk.Label(root, background='#edf3f8', borderwidth=0)
         self.banner.place(x=0, y=0, relwidth=1, relheight=1)
         self.banner.lower()
         root.bind('<Configure>', lambda event: self.schedule_banner(event) if event.widget is root else None)
@@ -119,26 +119,33 @@ class App:
         ttk.Entry(header, textvariable=self.api_hash, show='*', width=36).pack(side='left')
         ttk.Button(header, text='Выбрать обложку', command=self.choose_banner).pack(side='right')
         self.rows = []
-        panel = self.background_panel(root)
-        panel.pack(fill='x')
-        self.status_labels = []
-        for column, text in enumerate(('Аккаунт', 'Телефон', 'Подключение', 'Код', 'Пароль 2FA', '', 'Статус', '')):
-            ttk.Label(panel, text=text, style='Muted.TLabel').grid(row=0, column=column, sticky='w', padx=4, pady=(0, 6))
+        self.status_labels = [None] * 10
+        self.account_cards = {}
+        self.account_dialog = None
+        accounts = ttk.LabelFrame(root, text='Аккаунты', padding=12)
+        accounts.pack(fill='x', padx=12, pady=8)
+        actions = ttk.Frame(accounts)
+        actions.pack(fill='x', pady=(0, 10))
+        self.account_count = tk.StringVar(value='0 из 10 аккаунтов')
+        ttk.Label(actions, textvariable=self.account_count, style='Muted.TLabel').pack(side='left')
+        ttk.Button(actions, text='+ Добавить аккаунт', style='Accent.TButton', command=self.open_account).pack(side='right')
+        self.account_canvas = tk.Canvas(accounts, height=70, background='#ffffff', highlightthickness=0)
+        scrollbar = ttk.Scrollbar(accounts, orient='vertical', command=self.account_canvas.yview)
+        scrollbar.pack(side='right', fill='y')
+        self.account_canvas.pack(fill='x')
+        self.account_canvas.configure(yscrollcommand=scrollbar.set)
+        self.accounts_body = ttk.Frame(self.account_canvas)
+        self.accounts_item = self.account_canvas.create_window(0, 0, window=self.accounts_body, anchor='nw')
+        self.account_canvas.bind('<Configure>', lambda event: self.account_canvas.itemconfigure(self.accounts_item, width=event.width))
+        self.accounts_body.bind('<Configure>', lambda event: self.resize_accounts())
+        self.empty_accounts = ttk.Label(self.accounts_body, text='Добавьте первый аккаунт, чтобы начать.', style='Muted.TLabel', padding=18)
+        self.empty_accounts.pack(fill='x')
         for i in range(10):
-            phone, code, password = tk.StringVar(), tk.StringVar(), tk.StringVar()
-            status = tk.StringVar(value='● PeerFloodError' if i in self.restricted_accounts else 'Не подключён')
-            self.rows.append((phone, code, password, status))
-            ttk.Label(panel, text=f'Аккаунт {i+1}').grid(row=i+1, column=0, padx=5, pady=3)
-            ttk.Entry(panel, textvariable=phone, width=18).grid(row=i+1, column=1, pady=3)
-            ttk.Button(panel, text='Получить код / сессия', command=lambda n=i: self.connect(n)).grid(row=i+1, column=2, pady=3)
-            ttk.Entry(panel, textvariable=code, width=10).grid(row=i+1, column=3, pady=3)
-            ttk.Entry(panel, textvariable=password, show='*', width=15).grid(row=i+1, column=4, pady=3)
-            ttk.Button(panel, text='Войти', command=lambda n=i: self.login(n)).grid(row=i+1, column=5, pady=3)
-            status_label = ttk.Label(panel, textvariable=status, width=23, style='Error.TLabel' if i in self.restricted_accounts else 'TLabel')
-            status_label.grid(row=i+1, column=6, padx=6, pady=3)
-            self.status_labels.append(status_label)
-            ttk.Button(panel, text='Выйти', style='Danger.TButton', command=lambda n=i: self.logout(n)).grid(row=i+1, column=7, padx=4, pady=3)
-        ttk.Label(panel, text='Поля: телефон • код Telegram • пароль 2FA (если нужен)').grid(row=11, column=0, columnspan=8, pady=8)
+            status = tk.StringVar(value='● PeerFloodError' if i in self.restricted_accounts else 'Сохранённая сессия')
+            self.rows.append((tk.StringVar(), tk.StringVar(), tk.StringVar(), status))
+        for i in range(10):
+            if (DATA / f'account_{i+1}.session').exists():
+                self.show_account(i)
         controls = self.background_panel(root)
         controls.pack(fill='x')
         self.live = tk.BooleanVar(value=False)
@@ -156,20 +163,82 @@ class App:
         ttk.Button(toolbar, text='Очистить окно', command=self.clear_log).pack(side='right')
         body = ttk.Frame(journal)
         body.pack(fill='both', expand=True)
-        self.output = tk.Text(body, wrap='word', state='disabled', background='#111827',
-                              foreground='#d1d5db', selectbackground='#334155',
+        self.output = tk.Text(body, wrap='word', state='disabled', background='#f7faff',
+                              foreground='#34465a', selectbackground='#dbe5ee',
                               font=self.log_font, relief='flat', padx=12, pady=10,
                               spacing1=4, spacing3=6)
         scroll = ttk.Scrollbar(body, orient='vertical', command=self.output.yview)
         self.output.configure(yscrollcommand=scroll.set)
         scroll.pack(side='right', fill='y')
         self.output.pack(side='left', fill='both', expand=True)
-        for tag, color in {'info': '#d1d5db', 'offer': '#7dd3fc', 'success': '#86efac',
-                           'warning': '#fcd34d', 'error': '#fca5a5'}.items():
+        for tag, color in {'info': '#34465a', 'offer': '#2481cc', 'success': '#258b64',
+                           'warning': '#a86c12', 'error': '#d94c4c'}.items():
             self.output.tag_configure(tag, foreground=color)
         root.after(100, self.drain)
         root.after_idle(self.draw_banner)
         root.protocol('WM_DELETE_WINDOW', self.close)
+
+    def resize_accounts(self):
+        self.account_canvas.configure(scrollregion=self.account_canvas.bbox('all'),
+                                      height=min(230, max(70, self.accounts_body.winfo_reqheight())))
+
+    def show_account(self, i):
+        if i in self.account_cards:
+            return
+        self.empty_accounts.pack_forget()
+        card = ttk.Frame(self.accounts_body, padding=(8, 8))
+        self.account_cards[i] = card
+        avatar = tk.Canvas(card, width=38, height=38, background='#ffffff', highlightthickness=0)
+        avatar.create_oval(1, 1, 37, 37, fill='#2481cc', outline='')
+        avatar.create_text(19, 19, text=str(i+1), fill='#ffffff', font=('Helvetica', 13, 'bold'))
+        avatar.pack(side='left', padx=(0, 10))
+        details = ttk.Frame(card)
+        details.pack(side='left', fill='x', expand=True)
+        ttk.Label(details, text=f'Аккаунт {i+1}').pack(anchor='w')
+        label = self.status_labels[i] = ttk.Label(details, textvariable=self.rows[i][3],
+                                                style='Error.TLabel' if i in self.restricted_accounts else 'Muted.TLabel')
+        label.pack(anchor='w')
+        ttk.Button(card, text='Подключить', command=lambda: self.open_account(i)).pack(side='left', padx=5)
+        ttk.Button(card, text='Выйти', style='Danger.TButton', command=lambda: self.logout(i)).pack(side='left')
+        for slot in sorted(self.account_cards):
+            self.account_cards[slot].pack_forget()
+            self.account_cards[slot].pack(fill='x', pady=2)
+        self.account_count.set(f'{len(self.account_cards)} из 10 аккаунтов')
+        self.root.after_idle(self.resize_accounts)
+
+    def open_account(self, i=None):
+        if self.account_dialog and self.account_dialog.winfo_exists():
+            self.account_dialog.lift()
+            return
+        if i is None:
+            i = next((slot for slot in range(10) if slot not in self.account_cards), None)
+            if i is None:
+                messagebox.showinfo('Аккаунты', 'Можно добавить до 10 аккаунтов. Сначала выйдите из одного из них.')
+                return
+        window = self.account_dialog = tk.Toplevel(self.root)
+        self.account_dialog_slot = i
+        window.title(f'Добавить аккаунт • слот {i+1}')
+        window.geometry('440x430')
+        window.resizable(False, False)
+        window.configure(background='#ffffff')
+        body = ttk.Frame(window, padding=24)
+        body.pack(fill='both', expand=True)
+        ttk.Label(body, text='Вход в Telegram', style='Title.TLabel').pack(anchor='w', pady=(0, 8))
+        ttk.Label(body, text='Сначала укажите API ID и API Hash в главном окне.', style='Muted.TLabel', wraplength=370).pack(anchor='w', pady=(0, 12))
+        phone, code, password, status = self.rows[i]
+        ttk.Label(body, text='Номер телефона с кодом страны').pack(anchor='w')
+        ttk.Entry(body, textvariable=phone).pack(fill='x', pady=(2, 8))
+        ttk.Button(body, text='Получить код / подключить сессию', command=lambda: self.connect(i)).pack(fill='x', pady=(0, 10))
+        fields = ttk.Frame(body)
+        fields.pack(fill='x')
+        fields.columnconfigure(0, weight=1)
+        fields.columnconfigure(1, weight=1)
+        ttk.Label(fields, text='Код Telegram').grid(row=0, column=0, sticky='w')
+        ttk.Label(fields, text='Пароль 2FA, если нужен').grid(row=0, column=1, sticky='w')
+        ttk.Entry(fields, textvariable=code, width=12).grid(row=1, column=0, sticky='ew', padx=(0, 8), pady=4)
+        ttk.Entry(fields, textvariable=password, show='*', width=16).grid(row=1, column=1, sticky='ew', pady=4)
+        ttk.Label(body, textvariable=status, style='Muted.TLabel').pack(anchor='w', pady=10)
+        ttk.Button(body, text='Войти', style='Accent.TButton', command=lambda: self.login(i)).pack(fill='x')
 
     def install_control_theme(self, style):
         # Native ttk handles focus, keyboard activation and widget states;
@@ -180,17 +249,15 @@ class App:
             self.control_images.append(value)
             return value
         for name, colors in {
-            'TButton': ('#253b55', '#345775', '#192b42'),
-            'Accent.TButton': ('#0d9488', '#14b8a6', '#0f766e'),
-            'Danger.TButton': ('#632b42', '#94364e', '#492033'),
+            'TButton': ('#edf4fa', '#deedf9', '#cfe4f5'),
+            'Accent.TButton': ('#2481cc', '#3495de', '#1d6fb4'),
+            'Danger.TButton': ('#fff1f1', '#ffe4e4', '#ffd5d5'),
         }.items():
             images = []
-            for color in (*colors, '#263041'):
+            for color in (*colors, '#edf1f5'):
                 image = Image.new('RGBA', (64, 42))
                 draw = ImageDraw.Draw(image)
-                draw.rounded_rectangle((1, 3, 62, 41), radius=11, fill='#080f1c')
-                draw.rounded_rectangle((1, 1, 62, 38), radius=11, fill=color, outline='#56718b', width=1)
-                draw.line((14, 3, 49, 3), fill='#ffffff30', width=1)
+                draw.rounded_rectangle((1, 1, 62, 38), radius=8, fill=color, outline='#dbe5ee', width=1)
                 images.append(photo(image))
             element = 'Offers.' + name + '.face'
             style.element_create(element, 'image', images[0], ('disabled', images[3]),
@@ -200,15 +267,15 @@ class App:
                 ('Button.padding', {'sticky': 'nsew', 'children': [
                     ('Button.focus', {'sticky': 'nsew', 'children': [
                         ('Button.label', {'sticky': 'nsew'})]})]})]})])
-            style.configure(name, padding=(13, 8), foreground='#f8fafc', borderwidth=0)
+            style.configure(name, padding=(13, 8), foreground='#ffffff' if name == 'Accent.TButton' else '#d94c4c' if name == 'Danger.TButton' else '#2481cc', borderwidth=0)
             style.map(name, foreground=[('disabled', '#64748b')])
         indicators = []
         for selected, active in ((False, False), (True, False), (False, True)):
             image = Image.new('RGBA', (26, 24))
             draw = ImageDraw.Draw(image)
             draw.rounded_rectangle((1, 2, 20, 21), radius=5,
-                                   fill='#14b8a6' if selected else '#20384a' if active else '#0b1424',
-                                   outline='#5eead4' if selected or active else '#64748b', width=1)
+                                   fill='#2481cc' if selected else '#edf4fa' if active else '#ffffff',
+                                   outline='#2481cc' if selected or active else '#64748b', width=1)
             if selected:
                 draw.line((5, 11, 9, 15, 16, 7), fill='#ffffff', width=3, joint='curve')
             indicators.append(photo(image))
@@ -230,7 +297,7 @@ class App:
         window = self.gifts_window = tk.Toplevel(self.root)
         window.title('Подарки • выбор коллекций')
         window.geometry('490x620')
-        window.configure(background='#152033')
+        window.configure(background='#ffffff')
         controls = ttk.Frame(window, padding=12)
         controls.pack(fill='x')
         self.gifts_all = tk.BooleanVar(value=self.gift_selection['all'])
@@ -243,7 +310,7 @@ class App:
         search = ttk.Entry(controls, textvariable=self.gift_search)
         search.pack(fill='x', pady=(0, 6))
         self.gift_search.trace_add('write', lambda *args: self.render_gifts())
-        canvas = tk.Canvas(window, background='#152033', highlightthickness=0)
+        canvas = tk.Canvas(window, background='#ffffff', highlightthickness=0)
         scrollbar = ttk.Scrollbar(window, orient='vertical', command=canvas.yview)
         scrollbar.pack(side='right', fill='y')
         canvas.pack(fill='both', expand=True, padx=12)
@@ -317,7 +384,7 @@ class App:
         controls.pack(fill='x')
         ttk.Checkbutton(controls, text='Автопрокрутка', variable=self.follow).pack(side='left')
         ttk.Button(controls, text='Очистить журнал', command=self.clear_log).pack(side='right')
-        text = self.detached_output = tk.Text(window, background='#0b1424', foreground='#d1d5db', font=self.log_font, wrap='word', state='disabled', padx=14, pady=12, relief='flat', spacing3=6)
+        text = self.detached_output = tk.Text(window, background='#ffffff', foreground='#34465a', font=self.log_font, wrap='word', state='disabled', padx=14, pady=12, relief='flat', spacing3=6)
         scrollbar = ttk.Scrollbar(window, command=text.yview)
         scrollbar.pack(side='right', fill='y')
         text.configure(yscrollcommand=scrollbar.set)
@@ -353,8 +420,8 @@ class App:
             self.log('Ошибка: не удалось сохранить отметку ограничения аккаунта')
 
     def background_panel(self, parent):
-        frame = tk.Frame(parent, background='#111111', padx=10, pady=10)
-        background = tk.Label(frame, background='#111111', borderwidth=0)
+        frame = tk.Frame(parent, background='#edf3f8', padx=10, pady=10)
+        background = tk.Label(frame, background='#edf3f8', borderwidth=0)
         background.place(x=-10, y=-10, relwidth=1, relheight=1, width=20, height=20)
         background.lower()
         self.background_panels.append((frame, background))
@@ -390,7 +457,7 @@ class App:
         if self.banner_source is None:
             return
         image = ImageOps.fit(self.banner_source, (width, height), Image.Resampling.LANCZOS)
-        image = Image.blend(image, Image.new('RGB', image.size, '#000000'), 0.25)
+        image = Image.blend(image, Image.new('RGB', image.size, '#ffffff'), 0.68)
         self.banner_photo = ImageTk.PhotoImage(image)
         self.banner.configure(image=self.banner_photo)
         for frame, background in self.background_panels:
@@ -435,12 +502,22 @@ class App:
                 self.rows[i][1].set('')
                 self.rows[i][2].set('')
                 self.rows[i][3].set('Не подключён')
-                self.status_labels[i].configure(style='TLabel')
+                self.rows[i][0].set('')
+                card = self.account_cards.pop(i, None)
+                if card:
+                    card.destroy()
+                self.status_labels[i] = None
+                self.account_count.set(f'{len(self.account_cards)} из 10 аккаунтов')
+                if not self.account_cards:
+                    self.empty_accounts.pack(fill='x')
             elif kind == 'status':
                 i, text = payload
+                self.show_account(i)
                 limited = i in self.restricted_accounts
                 self.rows[i][3].set('● PeerFloodError' if limited else text)
-                self.status_labels[i].configure(style='Error.TLabel' if limited else 'TLabel')
+                self.status_labels[i].configure(style='Error.TLabel' if limited else 'Muted.TLabel')
+                if text == 'Подключён' and self.account_dialog and self.account_dialog.winfo_exists() and self.account_dialog_slot == i:
+                    self.account_dialog.destroy()
                 self.log(f'Аккаунт {i+1}: {text}')
             else:
                 level, line = payload
