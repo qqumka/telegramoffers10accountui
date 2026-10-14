@@ -1,10 +1,13 @@
 import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import tempfile
+import asyncio
+import queue
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
+from types import SimpleNamespace
 from PySide6.QtWidgets import QApplication
 import desktop
 import ui_qt
@@ -82,6 +85,43 @@ class DesktopUI(unittest.TestCase):
             self.app.processEvents()
             self.assertEqual(self.window.stack.currentIndex(), i)
         self.assertTrue(self.window.selection['all'])
+
+
+class TrialSending(unittest.IsolatedAsyncioTestCase):
+    def backend(self, clients):
+        backend = ui_qt.Backend.__new__(ui_qt.Backend)
+        backend.clients, backend.restricted_accounts, backend.connecting = clients, set(), set()
+        backend.task, backend.testing, backend.test_task = None, False, None
+        backend.logs = queue.Queue()
+        backend.log = lambda text: None
+        return backend
+
+    async def test_each_authorized_account_sends_exact_text_once(self):
+        clients = {i: SimpleNamespace(is_user_authorized=AsyncMock(return_value=i != 2), send_message=AsyncMock()) for i in range(4)}
+        backend = self.backend(clients)
+        backend.restricted_accounts = {3}
+        with patch.object(ui_qt.asyncio, 'sleep', AsyncMock()):
+            await backend.send_test()
+        for i in (0, 1):
+            clients[i].send_message.assert_awaited_once_with('rus81quuodh', 'dcsnjdc Mirage Lamp #51160 1098 stars ru', parse_mode=None)
+        for i in (2, 3): clients[i].send_message.assert_not_awaited()
+        self.assertFalse(backend.testing)
+
+    async def test_peerflood_stops_trial_without_using_next_account(self):
+        clients = {i: SimpleNamespace(is_user_authorized=AsyncMock(return_value=True), send_message=AsyncMock()) for i in range(2)}
+        clients[0].send_message.side_effect = desktop.PeerFloodError(request=None)
+        backend = self.backend(clients)
+        with tempfile.TemporaryDirectory() as folder, patch.object(desktop, 'DATA', Path(folder)):
+            await backend.send_test()
+        clients[1].send_message.assert_not_awaited()
+        self.assertEqual(backend.restricted_accounts, {0})
+        self.assertFalse(backend.testing)
+
+    async def test_duplicate_trial_is_rejected(self):
+        client = SimpleNamespace(is_user_authorized=AsyncMock(return_value=True), send_message=AsyncMock())
+        backend = self.backend({0: client}); backend.testing = True
+        await backend.send_test()
+        client.send_message.assert_not_awaited()
 
 
 if __name__ == '__main__': unittest.main()

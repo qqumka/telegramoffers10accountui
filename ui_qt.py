@@ -19,6 +19,8 @@ from PIL import Image, ImageOps
 import desktop as core
 
 DATA = core.DATA
+TEST_RECIPIENT = 'rus81quuodh'
+TEST_MESSAGE = 'dcsnjdc Mirage Lamp #51160 1098 stars ru'
 
 
 class Value:
@@ -35,6 +37,7 @@ class Backend(core.App):
         self.logs = queue.Queue()
         self.clients, self.hashes, self.connecting = {}, {}, set()
         self.task, self.paused = None, False
+        self.testing, self.test_task = False, None
         self.rows = [(Value(), Value(), Value(), Value('Сохранённая сессия')) for _ in range(10)]
         limits = core.read_settings(DATA / 'account_limits.json', [])
         self.restricted_accounts = {i for i in limits if type(i) is int and 0 <= i < 10} if isinstance(limits, list) else set()
@@ -44,6 +47,8 @@ class Backend(core.App):
 
     def begin(self, live, selection):
         async def run():
+            if self.testing:
+                self.log('Дождитесь завершения пробной отправки.'); return
             if self.task and not self.task.done():
                 self.log('Уже запущено. Остановите сканирование перед изменением режима.')
                 return
@@ -51,6 +56,40 @@ class Backend(core.App):
             self.task = asyncio.create_task(self.scan(live, selection))
             self.task.add_done_callback(self.finished)
         self.submit(run())
+
+    async def send_test(self):
+        if self.testing or (self.task and not self.task.done()):
+            self.log('Пробное: остановите сканирование и дождитесь завершения текущей отправки.'); return
+        self.testing = True; self.test_task = asyncio.current_task()
+        sent = 0
+        try:
+            self.log(f'Пробное: получатель @{TEST_RECIPIENT}; текст: {TEST_MESSAGE}')
+            for i, client in sorted(self.clients.items()):
+                if i in self.restricted_accounts or i in self.connecting:
+                    self.log(f'Пропуск • пробное • аккаунт {i+1}: ограничение или выполняется вход'); continue
+                try:
+                    if not await client.is_user_authorized():
+                        self.log(f'Пропуск • пробное • аккаунт {i+1}: требуется вход'); continue
+                    await client.send_message(TEST_RECIPIENT, TEST_MESSAGE, parse_mode=None)
+                except core.PeerFloodError:
+                    self.mark_peer_flood(i); return
+                except core.FloodWaitError as exc:
+                    self.log(f'Telegram ограничил аккаунт {i+1} на {exc.seconds} сек. Пробная отправка остановлена.'); return
+                except Exception as exc:
+                    self.log(f'Не отправлено • пробное • аккаунт {i+1}: {type(exc).__name__}')
+                else:
+                    sent += 1
+                    self.log(f'Отправлено • пробное • аккаунт {i+1} → @{TEST_RECIPIENT}')
+                    await asyncio.sleep(1)
+            self.log(f'Пробное завершено: отправлено {sent} сообщений. История продавцов не изменена.')
+        except asyncio.CancelledError:
+            self.log('Пробная отправка остановлена'); raise
+        finally:
+            self.testing = False; self.test_task = None
+
+    def stop(self):
+        super().stop()
+        if self.test_task and not self.test_task.done(): self.test_task.cancel()
 
     def shutdown(self):
         async def run():
@@ -274,7 +313,8 @@ class Window(QMainWindow):
         box.addLayout(metrics); self.sent = 0
         controls, inner = card(); row = QHBoxLayout(); self.live = Check('Отправка сообщений'); self.live.toggled.connect(self.update_metrics); row.addWidget(self.live); row.addStretch()
         self.start_button = button('Запустить', self.start, 'primary', 'play'); self.pause_button = button('Пауза', lambda: self.backend.loop.call_soon_threadsafe(self.backend.pause), symbol='pause'); self.stop_button = button('Стоп', lambda: self.backend.loop.call_soon_threadsafe(self.backend.stop), symbol='stop')
-        for item in (self.start_button, self.pause_button, self.stop_button): row.addWidget(item)
+        self.test_button = button('Пробное', self.send_test)
+        for item in (self.test_button, self.start_button, self.pause_button, self.stop_button): row.addWidget(item)
         inner.addLayout(row); inner.addWidget(label('Первый круг запоминает рынок. Со второго — только новые находки.', 'muted')); box.addWidget(controls)
         events, inner = card(); top = QHBoxLayout(); top.addWidget(label('Последние события')); top.addStretch(); top.addWidget(button('Все логи', lambda: self.navigate(3))); inner.addLayout(top)
         self.preview_log = QTextEdit(); self.preview_log.setReadOnly(True); self.preview_log.setPlaceholderText('События появятся здесь после запуска сканирования.'); self.preview_log.document().setMaximumBlockCount(250); inner.addWidget(self.preview_log); box.addWidget(events, 1)
@@ -364,12 +404,13 @@ class Window(QMainWindow):
             self.warn('Откройте «Настройки» и введите API ID и API Hash с my.telegram.org/apps.'); return
         self.backend.rows[i][0].set(phone.strip())
         async def run():
-            if self.backend.task and not self.backend.task.done():
+            if self.backend.testing or (self.backend.task and not self.backend.task.done()):
                 self.backend.log('Остановите сканирование перед подключением аккаунтов.'); return
             await self.backend.connect_account(i, api_id, api_hash, phone.strip())
         self.backend.submit(run())
 
     def logout(self, i):
+        if self.backend.testing: self.warn('Дождитесь завершения пробной отправки или нажмите «Стоп».'); return
         if QMessageBox.question(self, 'Выход из аккаунта', 'Завершить эту сессию Telegram? Сканирование остановится. Для повторного входа потребуется код.') != QMessageBox.StandardButton.Yes: return
         if i not in self.backend.clients:
             self.warn('Сначала подключите сохранённую сессию, чтобы завершить её в Telegram.'); return
@@ -380,6 +421,12 @@ class Window(QMainWindow):
         if not selection['all'] and not selection['names']: self.warn('Выберите хотя бы одну коллекцию в разделе «Подарки».'); return
         if self.live.isChecked() and QMessageBox.question(self, 'Отправка сообщений', 'Отправлять предложения владельцам от подключённых аккаунтов? Убедитесь, что получатели согласны получать сообщения.') != QMessageBox.StandardButton.Yes: return
         self.backend.begin(self.live.isChecked(), selection)
+
+    def send_test(self):
+        if self.backend.testing or (self.backend.task and not self.backend.task.done()):
+            self.warn('Сначала остановите сканирование и текущую отправку.'); return
+        if QMessageBox.question(self, 'Пробная отправка', f'Каждый подключённый аккаунт отправит одно сообщение в @{TEST_RECIPIENT}:\n\n{TEST_MESSAGE}') != QMessageBox.StandardButton.Yes: return
+        self.backend.submit(self.backend.send_test())
 
     def refresh_catalog(self):
         async def run():
@@ -414,10 +461,11 @@ class Window(QMainWindow):
         self.metric_values[1].setText(str(len(self.catalog)) if self.selection['all'] and self.catalog else 'Все' if self.selection['all'] else str(len(self.selection['names'])))
         self.metric_values[2].setText(str(getattr(self, 'sent', 0)))
         live = hasattr(self, 'live') and self.live.isChecked(); self.mode_badge.setText('ОТПРАВКА' if live else 'ПРЕДПРОСМОТР'); self.side_status.setText('●  Отправка включена' if live else '●  Предпросмотр')
-        running = self.backend.task is not None and not self.backend.task.done()
+        scanning = self.backend.task is not None and not self.backend.task.done()
+        running = scanning or self.backend.testing
         if hasattr(self, 'live'): self.live.setEnabled(not running)
         if hasattr(self, 'pause_button'):
-            self.pause_button.setEnabled(running); self.stop_button.setEnabled(running); self.pause_button.setText('Продолжить' if self.backend.paused else 'Пауза'); self.start_button.setEnabled(not running)
+            self.pause_button.setEnabled(scanning); self.stop_button.setEnabled(running); self.pause_button.setText('Продолжить' if self.backend.paused else 'Пауза'); self.start_button.setEnabled(not running); self.test_button.setEnabled(not running)
 
     def append_event(self, widget, level, text):
         colors = {'info': '#6c727e', 'offer': '#9a781f', 'success': '#25856b', 'warning': '#b87b25', 'error': '#c95757'}
