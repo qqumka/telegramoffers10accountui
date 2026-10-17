@@ -66,6 +66,16 @@ class DesktopUI(unittest.TestCase):
         self.assertEqual(self.window.selection, {'all': False, 'names': ['Mirage Lamp']})
         self.assertEqual(desktop.read_settings(Path(self.folder.name)/'gifts.json', {}), self.window.selection)
 
+    def test_tracker_switch_persists_without_logging_out(self):
+        self.window.backend.logs.put(('status', (0, 'Подключён')))
+        self.window.drain()
+        self.window.toggle_tracker(0, False)
+        self.assertEqual(self.window.tracker_disabled, {0})
+        self.assertEqual(desktop.read_settings(Path(self.folder.name)/'tracker_disabled.json', []), [0])
+        self.assertEqual(self.window.connected, {0})
+        self.window.toggle_tracker(0, True)
+        self.assertEqual(self.window.tracker_disabled, set())
+
     def test_detached_log_survives_reopen_and_escapes_html(self):
         self.window.open_logs()
         self.window.backend.logs.put(('log', ('info', 'Gift <name> & owner')))

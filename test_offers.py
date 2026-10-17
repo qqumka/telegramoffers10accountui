@@ -78,6 +78,55 @@ class Commands(unittest.TestCase):
 
 
 class Integration(unittest.IsolatedAsyncioTestCase):
+    async def test_parallel_search_splits_collections_without_duplicate_requests(self):
+        app = desktop.App.__new__(desktop.App)
+        app.paused, app.log = False, lambda text: None
+        clients = {0: object(), 1: object()}
+        calls = []
+        both_started = asyncio.Event()
+        async def found(client, gift_id, seen, listings, stats):
+            calls.append((client, gift_id))
+            if len(calls) >= 2: both_started.set()
+            await asyncio.wait_for(both_started.wait(), timeout=3)
+            stats['total_seen_in_responses'] += 1
+            listings.append({'slug': str(gift_id)})
+        with patch.object(desktop.watcher, 'check_gift', found), patch.object(desktop.watcher, 'REQUEST_DELAY', 0):
+            listings, stats = await app.parallel_scan(clients, [10, 20, 30, 40, 50], set())
+        self.assertEqual(sorted(gift for _, gift in calls), [10, 20, 30, 40, 50])
+        self.assertEqual([gift for client, gift in calls if client is clients[0]], [10, 30, 50])
+        self.assertEqual([gift for client, gift in calls if client is clients[1]], [20, 40])
+        self.assertEqual(len(listings), 5)
+        self.assertEqual(stats['total_seen_in_responses'], 5)
+
+    async def test_parallel_limit_cancels_other_worker_and_keeps_account_identity(self):
+        app = desktop.App.__new__(desktop.App)
+        app.paused, app.log = False, lambda text: None
+        started, cancelled = asyncio.Event(), asyncio.Event()
+        async def found(client, gift_id, seen, listings, stats):
+            if gift_id == 1:
+                started.set()
+                try: await asyncio.Event().wait()
+                finally: cancelled.set()
+            else:
+                await started.wait()
+                raise desktop.PeerFloodError(request=None)
+        with patch.object(desktop.watcher, 'check_gift', found):
+            with self.assertRaises(desktop.AccountScanError) as failure:
+                await app.parallel_scan({3: object(), 7: object()}, [1, 2], set())
+        self.assertEqual(failure.exception.slot, 7)
+        self.assertTrue(cancelled.is_set())
+
+    async def test_search_disabled_accounts_do_not_request_collections(self):
+        app = desktop.App.__new__(desktop.App)
+        app.clients = {i: SimpleNamespace(is_user_authorized=AsyncMock(return_value=True)) for i in range(3)}
+        app.tracker_disabled, app.paused, app.log = {0, 2}, False, lambda text: None
+        async def sleep(delay):
+            if delay == desktop.watcher.POLL_INTERVAL: raise asyncio.CancelledError()
+        with tempfile.TemporaryDirectory() as folder, patch.object(desktop, 'DATA', Path(folder)), patch.object(desktop.watcher, 'get_gift_ids_by_names', AsyncMock(return_value=[1, 2, 3])), patch.object(desktop.watcher, 'check_gift', AsyncMock()) as check, patch.object(desktop.asyncio, 'sleep', sleep):
+            with self.assertRaises(asyncio.CancelledError): await app.scan(False)
+            self.assertEqual(check.await_count, 3)
+            self.assertTrue(all(call.args[0] is app.clients[1] for call in check.call_args_list))
+
     async def test_scan_uses_only_selected_collection(self):
         app = desktop.App.__new__(desktop.App)
         client = SimpleNamespace(is_user_authorized=AsyncMock(return_value=True))

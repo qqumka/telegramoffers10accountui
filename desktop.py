@@ -43,6 +43,12 @@ def selected_catalog(catalog, selection):
     return [gift['id'] for gift in catalog if watcher._normalize_gift_name(gift['title']) in names]
 
 
+class AccountScanError(Exception):
+    def __init__(self, slot, cause):
+        self.slot, self.cause = slot, cause
+        super().__init__(f'Account {slot+1}: {type(cause).__name__}')
+
+
 class WallpaperLabel(tk.Canvas):
     """Draw text over the matching wallpaper crop instead of an opaque label."""
     def __init__(self, app, parent, text='', textvariable=None, style='TLabel', padding=3):
@@ -783,13 +789,50 @@ class App:
         if self.task:
             self.task.cancel()
 
+    async def parallel_scan(self, trackers, ids, seen):
+        async def worker(slot, client, gift_ids):
+            listings = []
+            stats = dict(total_seen_in_responses=0, new_slugs=0, filtered_by_name=0, filtered_names_sample=[], errors=0)
+            try:
+                for gift_id in gift_ids:
+                    while self.paused:
+                        await asyncio.sleep(0.2)
+                    await watcher.check_gift(client, gift_id, seen, listings, stats)
+                    await asyncio.sleep(watcher.REQUEST_DELAY)
+            except Exception as exc:
+                raise AccountScanError(slot, exc) from exc
+            return listings, stats
+        assignments = [(slot, client, ids[index::len(trackers)]) for index, (slot, client) in enumerate(trackers.items())]
+        self.log('Разделение поиска: ' + ' • '.join(f'аккаунт {slot+1}: {len(gifts)} коллекций' for slot, _, gifts in assignments))
+        tasks = [asyncio.create_task(worker(slot, client, gifts)) for slot, client, gifts in assignments if gifts]
+        try:
+            results = await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                if not task.done(): task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        listings = []
+        stats = dict(total_seen_in_responses=0, new_slugs=0, filtered_by_name=0, filtered_names_sample=[], errors=0)
+        for found, counters in results:
+            listings.extend(found)
+            for name, value in counters.items():
+                if isinstance(value, dict):
+                    target = stats.setdefault(name, {})
+                    for key, count in value.items(): target[key] = target.get(key, 0) + count
+                elif isinstance(value, list): stats.setdefault(name, []).extend(value)
+                else: stats[name] = stats.get(name, 0) + value
+        return listings, stats
+
     async def scan(self, live, selection=None):
         clients = {i: c for i, c in sorted(self.clients.items()) if i not in getattr(self, 'restricted_accounts', set()) and i not in getattr(self, 'connecting', set()) and await c.is_user_authorized()}
         if not clients:
             self.log('Сначала подключите аккаунт')
             return
-        primary = next(iter(clients.values()))
-        current_slot = next(iter(clients))
+        trackers = {i: client for i, client in clients.items() if i not in getattr(self, 'tracker_disabled', set())}
+        if not trackers:
+            self.log('Включите «Поиск» хотя бы у одного подключённого аккаунта.'); return
+        primary = next(iter(trackers.values()))
+        current_slot = next(iter(trackers))
         store = OfferStore(DATA / ('offers.sqlite' if live else 'preview.sqlite'))
         seen = store.known_slugs()
         warming_up = True
@@ -821,17 +864,13 @@ class App:
             while True:
                 while self.paused:
                     await asyncio.sleep(0.2)
-                listings = []
+                trackers = {i: client for i, client in clients.items() if i not in getattr(self, 'tracker_disabled', set())}
+                if not trackers:
+                    self.log('Поиск выключен на всех аккаунтах. Сканирование остановлено.'); return
+                current_slot = next(iter(trackers)); primary = trackers[current_slot]
                 # check_gift marks discoveries locally; failed owner lookups must be retryable.
                 pass_seen = set(seen)
-                stats = dict(total_seen_in_responses=0, new_slugs=0, filtered_by_name=0, filtered_names_sample=[], errors=0)
-                for index, gift_id in enumerate(ids):
-                    while self.paused:
-                        await asyncio.sleep(0.2)
-                    current_slot = list(clients)[index % len(clients)]
-                    client = clients[current_slot]
-                    await watcher.check_gift(client, gift_id, pass_seen, listings, stats)
-                    await asyncio.sleep(watcher.REQUEST_DELAY)
+                listings, stats = await self.parallel_scan(trackers, ids, pass_seen)
                 self.log(f"Рынок: получено {stats['total_seen_in_responses']} лотов • доступны за Stars {stats.get('stars_listings', 0)} • уже известны {stats.get('known_gifts', 0)} • исключены по валюте {stats.get('filtered_currency', 0)} • без ссылки {stats.get('missing_slug', 0)} • новых {len(listings)} • ошибок {stats['errors']}")
                 if stats.get('price_types'):
                     self.log('Типы цен Telegram: ' + ', '.join(f'{name}: {count}' for name, count in sorted(stats['price_types'].items())))
@@ -849,7 +888,7 @@ class App:
                     await asyncio.sleep(watcher.POLL_INTERVAL)
                     continue
                 listings = [listing for listing in listings if not store.seen_owner(getattr(listing['owner_id'], 'user_id', None))]
-                current_slot = next(iter(clients))
+                current_slot = next(iter(trackers))
                 info = await watcher.resolve_owner_info(primary, listings) if listings else {}
                 for listing in listings:
                     while self.paused:
@@ -900,6 +939,13 @@ class App:
                     await asyncio.sleep(max(1, watcher.SEND_DELAY_SECONDS))
                 self.log(f"Проход завершён: найдено {len(listings)}, ошибок запросов {stats['errors']}")
                 await asyncio.sleep(watcher.POLL_INTERVAL)
+        except AccountScanError as exc:
+            if isinstance(exc.cause, PeerFloodError):
+                self.mark_peer_flood(exc.slot)
+            elif isinstance(exc.cause, FloodWaitError):
+                self.log(f'Telegram ограничил запросы аккаунта {exc.slot+1} на {exc.cause.seconds} сек. Сканирование остановлено.')
+            else:
+                self.log(f'Ошибка: поиск аккаунта {exc.slot+1} — {type(exc.cause).__name__}. Сканирование остановлено.')
         except PeerFloodError:
             self.mark_peer_flood(current_slot)
         except FloodWaitError as exc:

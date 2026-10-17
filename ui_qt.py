@@ -41,6 +41,8 @@ class Backend(core.App):
         self.rows = [(Value(), Value(), Value(), Value('Сохранённая сессия')) for _ in range(10)]
         limits = core.read_settings(DATA / 'account_limits.json', [])
         self.restricted_accounts = {i for i in limits if type(i) is int and 0 <= i < 10} if isinstance(limits, list) else set()
+        disabled = core.read_settings(DATA / 'tracker_disabled.json', [])
+        self.tracker_disabled = {i for i in disabled if type(i) is int and 0 <= i < 10} if isinstance(disabled, list) else set()
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
         self.thread.start()
@@ -259,6 +261,7 @@ class Window(QMainWindow):
     def __init__(self):
         super().__init__(); self.setWindowTitle('Telegram Offers'); self.resize(1180, 850); self.setMinimumSize(1000, 730)
         self.backend = Backend(); self.history = deque(maxlen=2500); self.catalog = []
+        self.tracker_disabled = set(self.backend.tracker_disabled)
         self.accounts, self.statuses, self.connected = set(), {}, set()
         self.auth_dialogs = {}; self.detached = None; self.closing = False; self.closed = False
         selection = core.read_settings(DATA / 'gifts.json', {'all': True, 'names': []})
@@ -320,7 +323,7 @@ class Window(QMainWindow):
         self.preview_log = QTextEdit(); self.preview_log.setReadOnly(True); self.preview_log.setPlaceholderText('События появятся здесь после запуска сканирования.'); self.preview_log.document().setMaximumBlockCount(250); inner.addWidget(self.preview_log); box.addWidget(events, 1)
 
     def create_accounts(self):
-        _, box, head = self.page('Аккаунты', 'Добавляйте по одному. Сессии сохраняются на этом компьютере.')
+        _, box, head = self.page('Аккаунты', 'Включите «Поиск» на нужных аккаунтах. Коллекции делятся между ними параллельно.')
         head.addWidget(button('Добавить аккаунт', self.add_account, 'primary', 'plus'))
         self.account_area = QScrollArea(); self.account_area.setWidgetResizable(True); self.account_body = QWidget(); self.account_box = QVBoxLayout(self.account_body); self.account_box.setContentsMargins(2, 2, 8, 10); self.account_box.setSpacing(12); self.account_area.setWidget(self.account_body); box.addWidget(self.account_area)
 
@@ -333,8 +336,23 @@ class Window(QMainWindow):
             details = QVBoxLayout(); phone = self.backend.rows[i][0].get(); details.addWidget(label(phone or f'Аккаунт {i+1}'))
             limited = i in self.backend.restricted_accounts; status = label('● PeerFloodError' if limited else self.statuses.get(i, 'Не подключён'), 'muted')
             if limited: status.setStyleSheet('color: #cc5555; font-weight: 600;')
-            details.addWidget(status); row.addLayout(details, 1); row.addWidget(button('Подключить', lambda slot=i: self.open_auth(slot))); row.addWidget(button('Выйти', lambda slot=i: self.logout(slot), 'danger')); inner.addLayout(row); self.account_box.addWidget(item)
+            details.addWidget(status); row.addLayout(details, 1)
+            search = Check('Поиск'); search.setChecked(i not in self.tracker_disabled); search.setEnabled(not limited)
+            search.setToolTip('Участвует в поиске подарков. Отправка предложений настраивается отдельно. Изменение применяется со следующего круга.')
+            search.clicked.connect(lambda enabled, slot=i: self.toggle_tracker(slot, enabled)); row.addWidget(search)
+            row.addWidget(button('Подключить', lambda slot=i: self.open_auth(slot))); row.addWidget(button('Выйти', lambda slot=i: self.logout(slot), 'danger')); inner.addLayout(row); self.account_box.addWidget(item)
         self.account_box.addStretch()
+
+    def toggle_tracker(self, slot, enabled):
+        updated = set(self.tracker_disabled)
+        if enabled: updated.discard(slot)
+        else: updated.add(slot)
+        try: core.write_settings(DATA / 'tracker_disabled.json', sorted(updated))
+        except OSError:
+            self.warn('Не удалось сохранить переключатель поиска.'); self.render_accounts(); return
+        self.tracker_disabled = updated
+        self.backend.loop.call_soon_threadsafe(setattr, self.backend, 'tracker_disabled', set(updated))
+        self.backend.log(f'Аккаунт {slot+1}: поиск {"включён" if enabled else "выключен"}. Изменение действует со следующего круга; отправка предложений не меняется.')
 
     def create_gifts(self):
         _, box, head = self.page('Подарки', 'Ваш фокус. Оставьте только нужные коллекции или включите весь каталог.')
@@ -484,6 +502,10 @@ class Window(QMainWindow):
                     if text == 'Подключён': self.auth_dialogs[i].accept()
                 self.render_accounts()
             elif kind == 'signed_out':
+                self.tracker_disabled.discard(payload)
+                self.backend.loop.call_soon_threadsafe(setattr, self.backend, 'tracker_disabled', set(self.tracker_disabled))
+                try: core.write_settings(DATA / 'tracker_disabled.json', sorted(self.tracker_disabled))
+                except OSError: self.backend.log('Ошибка: не удалось сохранить настройки поиска после выхода')
                 for value in self.backend.rows[payload]: value.set('')
                 self.accounts.discard(payload); self.connected.discard(payload); self.statuses.pop(payload, None); self.render_accounts()
             elif kind == 'catalog': self.catalog = payload; self.render_gifts()
