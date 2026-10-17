@@ -833,6 +833,7 @@ class App:
             self.log('Включите «Поиск» хотя бы у одного подключённого аккаунта.'); return
         primary = next(iter(trackers.values()))
         current_slot = next(iter(trackers))
+        catalog_titles = {}
         store = OfferStore(DATA / ('offers.sqlite' if live else 'preview.sqlite'))
         seen = store.known_slugs()
         warming_up = True
@@ -840,9 +841,11 @@ class App:
         try:
             if selection is not None:
                 catalog = await watcher.get_gift_catalog(primary)
+                catalog_titles = {gift['id']: gift['title'] for gift in catalog}
                 ids = selected_catalog(catalog, selection)
                 self.logs.put(('catalog', catalog))
                 if not selection['all']:
+                    self.log(f"Выбор коллекций: отмечено {len(selection['names'])}, найдено в каталоге {len(ids)}")
                     found = {watcher._normalize_gift_name(gift['title']) for gift in catalog}
                     missing = [name for name in selection['names'] if watcher._normalize_gift_name(name) not in found]
                     if missing:
@@ -859,6 +862,7 @@ class App:
                 self.log('Ошибка: не найдено коллекций для сканирования')
                 return
             self.log(f'Коллекций: {len(ids)}; аккаунтов: {len(clients)}')
+            self.log('Выбраны коллекции: ' + ', '.join(catalog_titles.get(gift_id, str(gift_id)) for gift_id in ids))
             self.log(f'В сохранённой истории: {len(seen)} подарков')
             self.log('Первый проход: запоминаю текущие подарки, без предложений и отправки')
             while True:
@@ -871,6 +875,9 @@ class App:
                 # check_gift marks discoveries locally; failed owner lookups must be retryable.
                 pass_seen = set(seen)
                 listings, stats = await self.parallel_scan(trackers, ids, pass_seen)
+                for report in stats.get('collection_reports', []):
+                    title = catalog_titles.get(report['gift_id'], str(report['gift_id']))
+                    self.log(f"Коллекция {title}: лотов {report['total_seen_in_responses']}, Stars {report['stars_listings']}, новых {report['new_slugs']}, в истории {report['known_gifts']}, страниц {report['pages']}" + (f"; ошибка {report['error']}" if report.get('error') else '; есть следующие страницы' if report['more'] else ''))
                 self.log(f"Рынок: получено {stats['total_seen_in_responses']} лотов • доступны за Stars {stats.get('stars_listings', 0)} • уже известны {stats.get('known_gifts', 0)} • исключены по валюте {stats.get('filtered_currency', 0)} • без ссылки {stats.get('missing_slug', 0)} • новых {len(listings)} • ошибок {stats['errors']}")
                 if stats.get('price_types'):
                     self.log('Типы цен Telegram: ' + ', '.join(f'{name}: {count}' for name, count in sorted(stats['price_types'].items())))
@@ -887,7 +894,20 @@ class App:
                         self.log(f"Первый проход завершён: добавлено в историю {len(baseline)} новых подарков; доступны за Stars {stats.get('stars_listings', 0)}, уже известны {stats.get('known_gifts', 0)}. Следующие проходы обрабатывают только новые находки.")
                     await asyncio.sleep(watcher.POLL_INTERVAL)
                     continue
-                listings = [listing for listing in listings if not store.seen_owner(getattr(listing['owner_id'], 'user_id', None))]
+                dropped = {}
+                outcomes = {}
+                def outcome(listing, reason):
+                    title = listing.get('title', '?')
+                    counts = outcomes.setdefault(title, {})
+                    counts[reason] = counts.get(reason, 0) + 1
+                    dropped[reason] = dropped.get(reason, 0) + 1
+                candidates = []
+                for listing in listings:
+                    if store.seen_owner(getattr(listing['owner_id'], 'user_id', None)):
+                        outcome(listing, 'продавец уже записан')
+                    else:
+                        candidates.append(listing)
+                listings = candidates
                 current_slot = next(iter(trackers))
                 info = await watcher.resolve_owner_info(primary, listings) if listings else {}
                 for listing in listings:
@@ -896,28 +916,38 @@ class App:
                     uid = getattr(listing['owner_id'], 'user_id', None)
                     details = info.get(uid, {})
                     recipient = details.get('username')
-                    if not recipient or (watcher.EXCLUDE_PAID_MESSAGE_SELLERS and details.get('paid') is not False):
+                    if not recipient:
+                        outcome(listing, 'нет username или данных владельца')
+                        continue
+                    if watcher.EXCLUDE_PAID_MESSAGE_SELLERS and details.get('paid') is not False:
+                        outcome(listing, 'платные сообщения' if details.get('paid') else 'не удалось проверить платные сообщения')
                         continue
                     if not watcher.looks_cjk_anywhere(listing['owner_name'], details.get('about', '')):
                         level = details.get('level')
                         if level is not None and level > watcher.MAX_SELLER_LEVEL:
+                            outcome(listing, 'звёздный уровень выше лимита')
                             continue
                     try:
                         text = command(listing.get('title'), listing.get('num'), listing['price'])
                     except ValueError:
+                        outcome(listing, 'неподходящая цена или название')
                         self.log(f"Пропуск {listing['slug']}: требуется цена только в Stars, название и номер подарка")
                         continue
                     original = int(re.search(r'(?:^| / )(\d+) XTR', listing['price']).group(1))
                     if watcher.MIN_PRICE_STARS and original < watcher.MIN_PRICE_STARS:
+                        outcome(listing, 'ниже минимальной цены')
                         continue
                     if watcher.MAX_PRICE_STARS and original > watcher.MAX_PRICE_STARS:
+                        outcome(listing, 'выше максимальной цены')
                         continue
                     slot = store.reserve(listing['slug'], recipient, list(clients), text, owner_id=uid)
                     seen.add(listing['slug'])
                     if slot is None:
+                        outcome(listing, 'подарок или продавец уже записан')
                         continue
                     self.log(f'Аккаунт {slot+1} → @{recipient}: {text}')
                     if not live:
+                        outcome(listing, 'предпросмотр')
                         store.status(listing['slug'], 'preview')
                         continue
                     try:
@@ -932,12 +962,18 @@ class App:
                         return
                     except Exception as exc:
                         store.status(listing['slug'], 'failed')
+                        outcome(listing, 'ошибка отправки')
                         self.log(f'Не отправлено • аккаунт {slot+1} → @{recipient} • {listing["slug"]} • {type(exc).__name__}; автоматического повтора нет')
                     else:
+                        outcome(listing, 'отправлено')
                         store.status(listing['slug'], 'sent')
                         self.log(f'Отправлено • аккаунт {slot+1} → @{recipient} • {listing["slug"]}')
                     await asyncio.sleep(max(1, watcher.SEND_DELAY_SECONDS))
-                self.log(f"Проход завершён: найдено {len(listings)}, ошибок запросов {stats['errors']}")
+                for title, counts in sorted(outcomes.items()):
+                    self.log(f'Результат {title}: ' + '; '.join(f'{reason}: {count}' for reason, count in counts.items()))
+                if dropped:
+                    self.log('Итог отбора: ' + '; '.join(f'{reason}: {count}' for reason, count in dropped.items()))
+                self.log(f"Проход завершён: проверено {len(ids)} коллекций, новых кандидатов {len(listings)}, ошибок запросов {stats['errors']}")
                 await asyncio.sleep(watcher.POLL_INTERVAL)
         except AccountScanError as exc:
             if isinstance(exc.cause, PeerFloodError):

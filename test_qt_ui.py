@@ -96,6 +96,12 @@ class DesktopUI(unittest.TestCase):
             self.assertEqual(self.window.stack.currentIndex(), i)
         self.assertTrue(self.window.selection['all'])
 
+    def test_collection_metric_shows_requested_and_available_counts(self):
+        self.window.selection = {'all': False, 'names': ['Mirage Lamp', 'Missing Collection']}
+        self.window.catalog = [{'id': 1, 'title': 'Mirage Lamp'}]
+        self.window.update_metrics()
+        self.assertEqual(self.window.metric_values[1].text(), '1 / 2')
+
 
 class TrialSending(unittest.IsolatedAsyncioTestCase):
     def backend(self, clients):

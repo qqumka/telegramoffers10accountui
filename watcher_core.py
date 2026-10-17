@@ -24,7 +24,8 @@ MANUAL_GIFT_IDS: list[int] = []
 POLL_INTERVAL = 60
 SEND_DELAY_SECONDS = 5.5
 REQUEST_DELAY = 1.5
-LIMIT_PER_GIFT = 30
+LIMIT_PER_GIFT = 100
+MAX_PAGES_PER_GIFT = 3
 OWNER_INFO_BATCH_SIZE = 10
 OWNER_INFO_BATCH_DELAY = 1.0
 MIN_PRICE_STARS = None
@@ -314,14 +315,39 @@ def format_price(resell_amount) -> str:
     return ' / '.join(parts)
 
 async def check_gift(client: TelegramClient, gift_id: int, seen: set, new_listings: list, stats: dict) -> None:
+    before = {name: stats.get(name, 0) for name in ('total_seen_in_responses', 'stars_listings', 'known_gifts', 'new_slugs')}
+    report = {'gift_id': gift_id, 'pages': 0, 'more': False}
+    offset, offsets = '', set()
     try:
-        result = await client(GetResaleStarGiftsRequest(gift_id=gift_id, offset='', limit=LIMIT_PER_GIFT, sort_by_num=False, sort_by_price=False, stars_only=True))
-    except (FloodWaitError, PeerFloodError):
-        raise
-    except Exception as e:
-        print(f'[!] Ошибка запроса для gift_id={gift_id}: {e}')
-        stats['errors'] += 1
-        return
+        for page in range(MAX_PAGES_PER_GIFT):
+            try:
+                result = await client(GetResaleStarGiftsRequest(gift_id=gift_id, offset=offset, limit=LIMIT_PER_GIFT, sort_by_num=False, sort_by_price=False, stars_only=True))
+            except (FloodWaitError, PeerFloodError):
+                raise
+            except Exception as exc:
+                stats['errors'] += 1
+                report['error'] = type(exc).__name__
+                return
+            report['pages'] += 1
+            _consume_gift_page(result, seen, new_listings, stats)
+            next_offset = getattr(result, 'next_offset', None)
+            report['more'] = bool(next_offset)
+            if not next_offset:
+                break
+            if next_offset == offset or next_offset in offsets:
+                stats['errors'] += 1
+                report['error'] = 'RepeatedOffset'
+                break
+            offsets.add(next_offset)
+            offset = next_offset
+            if page + 1 < MAX_PAGES_PER_GIFT:
+                await asyncio.sleep(REQUEST_DELAY)
+    finally:
+        for name, value in before.items(): report[name] = stats.get(name, 0) - value
+        stats.setdefault('collection_reports', []).append(report)
+
+
+def _consume_gift_page(result, seen, new_listings, stats):
     total_in_response = len(getattr(result, 'gifts', []))
     stats['total_seen_in_responses'] += total_in_response
     for gift in getattr(result, 'gifts', []):

@@ -78,6 +78,38 @@ class Commands(unittest.TestCase):
 
 
 class Integration(unittest.IsolatedAsyncioTestCase):
+    async def test_collection_pagination_reads_later_pages(self):
+        from telethon.tl.types import StarsAmount
+        def gift(number):
+            return SimpleNamespace(slug=f'Gift-{number}', title='Mirage Lamp', num=number, resell_amount=[StarsAmount(400, 0)])
+        client = AsyncMock(side_effect=[SimpleNamespace(gifts=[gift(1)], next_offset='page2'), SimpleNamespace(gifts=[gift(2)], next_offset=None)])
+        stats = dict(total_seen_in_responses=0, new_slugs=0, errors=0, filtered_by_name=0, filtered_names_sample=[])
+        listings = []
+        with patch.object(desktop.watcher, 'REQUEST_DELAY', 0):
+            await desktop.watcher.check_gift(client, 1, set(), listings, stats)
+        self.assertEqual([call.args[0].offset for call in client.call_args_list], ['', 'page2'])
+        self.assertTrue(all(call.args[0].stars_only for call in client.call_args_list))
+        self.assertEqual([item['slug'] for item in listings], ['Gift-1', 'Gift-2'])
+        self.assertEqual(stats['collection_reports'][0]['pages'], 2)
+
+    async def test_collection_page_cap_reports_remaining_pages(self):
+        client = AsyncMock(side_effect=[SimpleNamespace(gifts=[], next_offset=f'page{i+1}') for i in range(3)])
+        stats = dict(total_seen_in_responses=0, new_slugs=0, errors=0)
+        with patch.object(desktop.watcher, 'REQUEST_DELAY', 0):
+            await desktop.watcher.check_gift(client, 1, set(), [], stats)
+        self.assertEqual(client.await_count, 3)
+        self.assertTrue(stats['collection_reports'][0]['more'])
+        self.assertEqual(stats['errors'], 0)
+
+    async def test_repeated_page_cursor_is_reported_as_incomplete_scan(self):
+        client = AsyncMock(return_value=SimpleNamespace(gifts=[], next_offset='same'))
+        stats = dict(total_seen_in_responses=0, new_slugs=0, errors=0)
+        with patch.object(desktop.watcher, 'REQUEST_DELAY', 0):
+            await desktop.watcher.check_gift(client, 1, set(), [], stats)
+        self.assertEqual(client.await_count, 2)
+        self.assertEqual(stats['errors'], 1)
+        self.assertEqual(stats['collection_reports'][0]['error'], 'RepeatedOffset')
+
     async def test_parallel_search_splits_collections_without_duplicate_requests(self):
         app = desktop.App.__new__(desktop.App)
         app.paused, app.log = False, lambda text: None

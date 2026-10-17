@@ -476,7 +476,15 @@ class Window(QMainWindow):
     def update_metrics(self):
         if not hasattr(self, 'metric_values'): return
         self.metric_values[0].setText(str(len(self.connected - self.backend.restricted_accounts)))
-        self.metric_values[1].setText(str(len(self.catalog)) if self.selection['all'] and self.catalog else 'Все' if self.selection['all'] else str(len(self.selection['names'])))
+        if self.selection['all']:
+            collections = str(len(self.catalog)) if self.catalog else 'Все'
+        elif self.catalog:
+            matched = len(core.selected_catalog(self.catalog, self.selection))
+            requested = len(self.selection['names'])
+            collections = f'{matched} / {requested}' if matched != requested else str(matched)
+        else:
+            collections = str(len(self.selection['names']))
+        self.metric_values[1].setText(collections)
         self.metric_values[2].setText(str(getattr(self, 'sent', 0)))
         live = hasattr(self, 'live') and self.live.isChecked(); self.mode_badge.setText('ОТПРАВКА' if live else 'ПРЕДПРОСМОТР'); self.side_status.setText('●  Отправка включена' if live else '●  Предпросмотр')
         scanning = self.backend.task is not None and not self.backend.task.done()
