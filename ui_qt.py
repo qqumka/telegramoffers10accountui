@@ -74,12 +74,17 @@ class Backend(core.App):
                         self.log(f'Пропуск • пробное • аккаунт {i+1}: требуется вход'); continue
                     await client.send_message(TEST_RECIPIENT, TEST_MESSAGE, parse_mode=None)
                 except core.PeerFloodError:
-                    self.mark_peer_flood(i); return
+                    self.peer_failure(i)
+                except (core.UserPrivacyRestrictedError, core.UserIsBlockedError):
+                    self.peer_success(i)
+                    self.log(f'Пропуск • пробное • аккаунт {i+1}: сообщения ограничены получателем')
                 except core.FloodWaitError as exc:
                     self.log(f'Telegram ограничил аккаунт {i+1} на {exc.seconds} сек. Пробная отправка остановлена.'); return
                 except Exception as exc:
+                    self.peer_success(i)
                     self.log(f'Не отправлено • пробное • аккаунт {i+1}: {type(exc).__name__}')
                 else:
+                    self.peer_success(i)
                     sent += 1
                     self.log(f'Отправлено • пробное • аккаунт {i+1} → @{TEST_RECIPIENT}')
                     await asyncio.sleep(1)
@@ -453,7 +458,7 @@ class Window(QMainWindow):
                 if i in self.backend.restricted_accounts or i in self.backend.connecting: continue
                 if await client.is_user_authorized():
                     try: catalog = await core.watcher.get_gift_catalog(client)
-                    except core.PeerFloodError: self.backend.mark_peer_flood(i); return
+                    except core.PeerFloodError: self.backend.peer_failure(i, 'read'); return
                     self.backend.logs.put(('catalog', catalog)); self.backend.log(f'Каталог обновлён: {len(catalog)} коллекций'); return
             self.backend.log('Подключите аккаунт, чтобы обновить каталог Telegram.')
         self.backend.submit(run())

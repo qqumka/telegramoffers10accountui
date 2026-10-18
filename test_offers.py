@@ -78,6 +78,54 @@ class Commands(unittest.TestCase):
 
 
 class Integration(unittest.IsolatedAsyncioTestCase):
+    async def test_three_consecutive_search_errors_disable_only_that_slot(self):
+        app = desktop.App.__new__(desktop.App)
+        app.paused, app.log, app.logs = False, lambda text: None, queue.Queue()
+        check = AsyncMock(side_effect=desktop.PeerFloodError(request=None))
+        with tempfile.TemporaryDirectory() as folder, patch.object(desktop, 'DATA', Path(folder)), patch.object(desktop.watcher, 'check_gift', check), patch.object(desktop.watcher, 'REQUEST_DELAY', 0):
+            _, stats = await app.parallel_scan({2: object()}, [1,2,3,4], set())
+        self.assertEqual(check.await_count, 3)
+        self.assertEqual(stats['errors'], 3)
+        self.assertEqual(app.restricted_accounts, {2})
+
+    async def test_owner_lookup_uses_the_account_that_found_each_gift(self):
+        app = desktop.App.__new__(desktop.App)
+        clients = {i: SimpleNamespace(is_user_authorized=AsyncMock(return_value=True)) for i in range(2)}
+        app.clients, app.paused, app.log = clients, False, lambda text: None
+        passes = 0
+        resolved = []
+        async def found(client, gift_id, seen, listings, stats):
+            if passes:
+                listings.append(dict(slug=f'Gift-{gift_id}', title='Mirage Lamp', num=gift_id, price='400 XTR', owner_id=SimpleNamespace(user_id=100+gift_id), owner_name='Owner'))
+        async def resolve(client, listings):
+            for item in listings:
+                self.assertIs(client, clients[item['num']-1])
+                resolved.append(item['num'])
+            return {item['owner_id'].user_id: dict(username=f'owner{item["num"]}', paid=False, level=0) for item in listings}
+        async def sleep(delay):
+            nonlocal passes
+            if delay == desktop.watcher.POLL_INTERVAL:
+                passes += 1
+                if passes == 2: raise asyncio.CancelledError()
+        with tempfile.TemporaryDirectory() as folder, patch.object(desktop, 'DATA', Path(folder)), patch.object(desktop.watcher, 'get_gift_ids_by_names', AsyncMock(return_value=[1,2])), patch.object(desktop.watcher, 'check_gift', found), patch.object(desktop.watcher, 'resolve_owner_info', resolve), patch.object(desktop.asyncio, 'sleep', sleep):
+            with self.assertRaises(asyncio.CancelledError): await app.scan(False)
+            self.assertEqual(sorted(resolved), [1, 2])
+
+    async def test_peer_streak_is_per_account_and_phase_and_success_resets_it(self):
+        app = desktop.App.__new__(desktop.App)
+        app.logs, app.log = queue.Queue(), lambda text: None
+        with tempfile.TemporaryDirectory() as folder, patch.object(desktop, 'DATA', Path(folder)):
+            self.assertFalse(app.peer_failure(0))
+            self.assertFalse(app.peer_failure(0))
+            app.peer_success(1)
+            app.peer_success(0, 'read')
+            self.assertEqual(app.peer_streaks[(0, 'send')], 2)
+            app.peer_success(0)
+            self.assertFalse(app.peer_failure(0))
+            self.assertFalse(app.peer_failure(0))
+            self.assertTrue(app.peer_failure(0))
+            self.assertEqual(app.restricted_accounts, {0})
+
     async def test_collection_pagination_reads_later_pages(self):
         from telethon.tl.types import StarsAmount
         def gift(number):
@@ -141,7 +189,7 @@ class Integration(unittest.IsolatedAsyncioTestCase):
                 finally: cancelled.set()
             else:
                 await started.wait()
-                raise desktop.PeerFloodError(request=None)
+                raise desktop.FloodWaitError(request=None, capture=30)
         with patch.object(desktop.watcher, 'check_gift', found):
             with self.assertRaises(desktop.AccountScanError) as failure:
                 await app.parallel_scan({3: object(), 7: object()}, [1, 2], set())
@@ -173,7 +221,7 @@ class Integration(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(scan.await_count, 1)
             self.assertEqual(scan.call_args.args[1], 1)
 
-    async def test_peerflood_marks_account_and_stops_sending(self):
+    async def test_first_peerflood_does_not_block_account_or_search(self):
         app = desktop.App.__new__(desktop.App)
         first = SimpleNamespace(is_user_authorized=AsyncMock(return_value=True), send_message=AsyncMock(side_effect=desktop.PeerFloodError(request=None)))
         other = SimpleNamespace(is_user_authorized=AsyncMock(return_value=True), send_message=AsyncMock())
@@ -188,25 +236,27 @@ class Integration(unittest.IsolatedAsyncioTestCase):
             if delay == desktop.watcher.POLL_INTERVAL:
                 passes += 1
                 if passes > 1:
-                    raise AssertionError('PeerFlood must stop the scan')
+                    raise asyncio.CancelledError()
         info = {123+i: dict(username=f'owner{i}', paid=False, level=0) for i in range(2)}
         with tempfile.TemporaryDirectory() as folder, patch.object(desktop, 'DATA', Path(folder)), patch.object(desktop.watcher, 'get_gift_ids_by_names', AsyncMock(return_value=[1])), patch.object(desktop.watcher, 'check_gift', found), patch.object(desktop.watcher, 'resolve_owner_info', AsyncMock(return_value=info)), patch.object(desktop.asyncio, 'sleep', sleep):
-            await app.scan(True)
+            with self.assertRaises(asyncio.CancelledError): await app.scan(True)
             first.send_message.assert_awaited_once()
-            other.send_message.assert_not_awaited()
-            self.assertEqual(app.restricted_accounts, {0})
-            self.assertEqual(app.logs.get_nowait(), ('status', (0, '● PeerFloodError')))
-            self.assertEqual(desktop.read_settings(Path(folder)/'account_limits.json', []), [0])
+            other.send_message.assert_awaited_once()
+            self.assertFalse(getattr(app, 'restricted_accounts', set()))
+            self.assertEqual(app.peer_streaks[(0, 'send')], 1)
 
     async def test_peerflood_during_scanning_marks_correct_slot(self):
         app = desktop.App.__new__(desktop.App)
         app.clients = {i: SimpleNamespace(is_user_authorized=AsyncMock(return_value=True)) for i in range(2)}
         app.paused, app.log, app.logs = False, lambda text: None, queue.Queue()
+        app.peer_streaks = {(1, 'read'): 2}
         async def found(client, gift_id, seen, listings, stats):
             if gift_id == 2:
                 raise desktop.PeerFloodError(request=None)
-        with tempfile.TemporaryDirectory() as folder, patch.object(desktop, 'DATA', Path(folder)), patch.object(desktop.watcher, 'get_gift_ids_by_names', AsyncMock(return_value=[1, 2])), patch.object(desktop.watcher, 'check_gift', found), patch.object(desktop.asyncio, 'sleep', AsyncMock()):
-            await app.scan(False)
+        async def sleep(delay):
+            if delay == desktop.watcher.POLL_INTERVAL: raise asyncio.CancelledError()
+        with tempfile.TemporaryDirectory() as folder, patch.object(desktop, 'DATA', Path(folder)), patch.object(desktop.watcher, 'get_gift_ids_by_names', AsyncMock(return_value=[1, 2])), patch.object(desktop.watcher, 'check_gift', found), patch.object(desktop.asyncio, 'sleep', sleep):
+            with self.assertRaises(asyncio.CancelledError): await app.scan(False)
             self.assertEqual(app.restricted_accounts, {1})
 
     async def test_parser_requests_and_accepts_only_stars(self):

@@ -123,13 +123,14 @@ class TrialSending(unittest.IsolatedAsyncioTestCase):
         for i in (2, 3): clients[i].send_message.assert_not_awaited()
         self.assertFalse(backend.testing)
 
-    async def test_peerflood_stops_trial_without_using_next_account(self):
+    async def test_third_peerflood_disables_only_failing_account(self):
         clients = {i: SimpleNamespace(is_user_authorized=AsyncMock(return_value=True), send_message=AsyncMock()) for i in range(2)}
         clients[0].send_message.side_effect = desktop.PeerFloodError(request=None)
         backend = self.backend(clients)
+        backend.peer_streaks = {(0, 'send'): 2}
         with tempfile.TemporaryDirectory() as folder, patch.object(desktop, 'DATA', Path(folder)):
             await backend.send_test()
-        clients[1].send_message.assert_not_awaited()
+        clients[1].send_message.assert_awaited_once()
         self.assertEqual(backend.restricted_accounts, {0})
         self.assertFalse(backend.testing)
 
@@ -138,6 +139,14 @@ class TrialSending(unittest.IsolatedAsyncioTestCase):
         backend = self.backend({0: client}); backend.testing = True
         await backend.send_test()
         client.send_message.assert_not_awaited()
+
+    async def test_privacy_error_is_not_peerflood_and_does_not_disable_account(self):
+        client = SimpleNamespace(is_user_authorized=AsyncMock(return_value=True), send_message=AsyncMock(side_effect=desktop.UserPrivacyRestrictedError(request=None)))
+        backend = self.backend({0: client})
+        backend.peer_streaks = {(0, 'send'): 2}
+        await backend.send_test()
+        self.assertFalse(backend.restricted_accounts)
+        self.assertNotIn((0, 'send'), backend.peer_streaks)
 
 
 if __name__ == '__main__': unittest.main()

@@ -14,7 +14,7 @@ from tkinter import font as tkfont
 from PIL import Image, ImageTk, ImageOps, ImageDraw
 
 from telethon import TelegramClient
-from telethon.errors import FloodWaitError, SessionPasswordNeededError, ApiIdInvalidError, PeerFloodError
+from telethon.errors import FloodWaitError, SessionPasswordNeededError, ApiIdInvalidError, PeerFloodError, UserPrivacyRestrictedError, UserIsBlockedError
 import watcher_core as watcher
 from offers import OfferStore, command
 
@@ -464,7 +464,7 @@ class App:
                     try:
                         catalog = await watcher.get_gift_catalog(client)
                     except PeerFloodError:
-                        self.mark_peer_flood(i)
+                        self.peer_failure(i, 'read')
                         return
                     self.logs.put(('catalog', catalog))
                     self.log(f'Каталог обновлён: {len(catalog)} коллекций')
@@ -512,11 +512,24 @@ class App:
             self.restricted_accounts = set()
         self.restricted_accounts.add(i)
         self.logs.put(('status', (i, '● PeerFloodError')))
-        self.log(f'Ошибка: аккаунт {i+1} — PeerFloodError. Работа остановлена; обход через другие аккаунты не выполняется.')
+        self.log(f'Ошибка: аккаунт {i+1} — PeerFloodError 3/3. Аккаунт выключен из поиска и отправки.')
         try:
             write_settings(DATA / 'account_limits.json', sorted(self.restricted_accounts))
         except OSError:
             self.log('Ошибка: не удалось сохранить отметку ограничения аккаунта')
+
+    def peer_failure(self, slot, phase='send'):
+        if not hasattr(self, 'peer_streaks'): self.peer_streaks = {}
+        key = (slot, phase)
+        count = self.peer_streaks[key] = self.peer_streaks.get(key, 0) + 1
+        if count >= 3:
+            self.mark_peer_flood(slot)
+            return True
+        self.log(f'Аккаунт {slot+1}: временный отказ Telegram {count}/3 ({"отправка" if phase == "send" else "поиск"}). Неудачная операция пропущена.')
+        return False
+
+    def peer_success(self, slot, phase='send'):
+        if hasattr(self, 'peer_streaks'): self.peer_streaks.pop((slot, phase), None)
 
     def background_panel(self, parent):
         frame = tk.Frame(parent, background='#edf3f8', padx=10, pady=10)
@@ -693,7 +706,7 @@ class App:
             self.logs.put(('status', (i, 'Проверьте API ID / Hash')))
             raise
         except PeerFloodError:
-            self.mark_peer_flood(i)
+            self.peer_failure(i, 'read')
             raise
         finally:
             self.connecting.discard(i)
@@ -789,15 +802,38 @@ class App:
         if self.task:
             self.task.cancel()
 
+    async def tracker_catalog(self, client, slot):
+        while True:
+            try:
+                catalog = await watcher.get_gift_catalog(client)
+            except PeerFloodError:
+                if self.peer_failure(slot, 'read'): return None
+                self.log(f'Каталог аккаунта {slot+1}: повтор через {watcher.POLL_INTERVAL} сек.')
+                await asyncio.sleep(watcher.POLL_INTERVAL)
+            else:
+                self.peer_success(slot, 'read')
+                return catalog
+
     async def parallel_scan(self, trackers, ids, seen):
         async def worker(slot, client, gift_ids):
             listings = []
             stats = dict(total_seen_in_responses=0, new_slugs=0, filtered_by_name=0, filtered_names_sample=[], errors=0)
             try:
                 for gift_id in gift_ids:
+                    if slot in getattr(self, 'restricted_accounts', set()): break
                     while self.paused:
                         await asyncio.sleep(0.2)
-                    await watcher.check_gift(client, gift_id, seen, listings, stats)
+                    start = len(listings)
+                    errors = stats['errors']
+                    try:
+                        await watcher.check_gift(client, gift_id, seen, listings, stats)
+                    except PeerFloodError:
+                        stats['errors'] += 1
+                        if self.peer_failure(slot, 'read'): break
+                    else:
+                        if stats['errors'] == errors: self.peer_success(slot, 'read')
+                    finally:
+                        for listing in listings[start:]: listing['_source_slot'] = slot
                     await asyncio.sleep(watcher.REQUEST_DELAY)
             except Exception as exc:
                 raise AccountScanError(slot, exc) from exc
@@ -840,7 +876,8 @@ class App:
         self.log('Режим: ' + ('ОТПРАВКА' if live else 'ПРЕДПРОСМОТР — сообщения не отправляются'))
         try:
             if selection is not None:
-                catalog = await watcher.get_gift_catalog(primary)
+                catalog = await self.tracker_catalog(primary, current_slot)
+                if catalog is None: return
                 catalog_titles = {gift['id']: gift['title'] for gift in catalog}
                 ids = selected_catalog(catalog, selection)
                 self.logs.put(('catalog', catalog))
@@ -868,7 +905,7 @@ class App:
             while True:
                 while self.paused:
                     await asyncio.sleep(0.2)
-                trackers = {i: client for i, client in clients.items() if i not in getattr(self, 'tracker_disabled', set())}
+                trackers = {i: client for i, client in clients.items() if i not in getattr(self, 'tracker_disabled', set()) and i not in getattr(self, 'restricted_accounts', set())}
                 if not trackers:
                     self.log('Поиск выключен на всех аккаунтах. Сканирование остановлено.'); return
                 current_slot = next(iter(trackers)); primary = trackers[current_slot]
@@ -908,13 +945,27 @@ class App:
                     else:
                         candidates.append(listing)
                 listings = candidates
-                current_slot = next(iter(trackers))
-                info = await watcher.resolve_owner_info(primary, listings) if listings else {}
+                # Telegram entity caches belong to individual sessions. Resolve a seller
+                # through the same account that obtained the listing and its access hash.
+                owner_groups = {}
+                for listing in listings:
+                    slot = listing.get('_source_slot', next(iter(trackers)))
+                    owner_groups.setdefault(slot, []).append(listing)
+                info_by_slot = {}
+                for current_slot, group in owner_groups.items():
+                    if current_slot in getattr(self, 'restricted_accounts', set()): continue
+                    try:
+                        info_by_slot[current_slot] = await watcher.resolve_owner_info(clients[current_slot], group)
+                        self.peer_success(current_slot, 'read')
+                    except PeerFloodError:
+                        self.peer_failure(current_slot, 'read')
+                        stats['errors'] += 1
                 for listing in listings:
                     while self.paused:
                         await asyncio.sleep(0.2)
                     uid = getattr(listing['owner_id'], 'user_id', None)
-                    details = info.get(uid, {})
+                    source = listing.get('_source_slot', next(iter(trackers)))
+                    details = info_by_slot.get(source, {}).get(uid, {})
                     recipient = details.get('username')
                     if not recipient:
                         outcome(listing, 'нет username или данных владельца')
@@ -940,7 +991,10 @@ class App:
                     if watcher.MAX_PRICE_STARS and original > watcher.MAX_PRICE_STARS:
                         outcome(listing, 'выше максимальной цены')
                         continue
-                    slot = store.reserve(listing['slug'], recipient, list(clients), text, owner_id=uid)
+                    senders = [i for i in clients if i not in getattr(self, 'restricted_accounts', set())]
+                    if not senders:
+                        self.log('Все аккаунты отключены от отправки. Сканирование остановлено.'); return
+                    slot = store.reserve(listing['slug'], recipient, senders, text, owner_id=uid)
                     seen.add(listing['slug'])
                     if slot is None:
                         outcome(listing, 'подарок или продавец уже записан')
@@ -953,18 +1007,25 @@ class App:
                     try:
                         await clients[slot].send_message(recipient, text, parse_mode=None)
                     except PeerFloodError:
-                        store.status(listing['slug'], 'blocked')
-                        self.mark_peer_flood(slot)
-                        return
+                        store.status(listing['slug'], 'failed')
+                        outcome(listing, 'временный отказ Telegram')
+                        self.peer_failure(slot)
+                    except (UserPrivacyRestrictedError, UserIsBlockedError):
+                        self.peer_success(slot)
+                        store.status(listing['slug'], 'failed')
+                        outcome(listing, 'получатель запретил сообщения')
+                        self.log(f'Пропуск • аккаунт {slot+1} → @{recipient}: сообщения ограничены получателем')
                     except FloodWaitError as exc:
                         store.status(listing['slug'], 'blocked')
                         self.log(f'Telegram ограничил аккаунт {slot+1} на {exc.seconds} сек. Отправка остановлена; другие аккаунты не используются для обхода.')
                         return
                     except Exception as exc:
+                        self.peer_success(slot)
                         store.status(listing['slug'], 'failed')
                         outcome(listing, 'ошибка отправки')
                         self.log(f'Не отправлено • аккаунт {slot+1} → @{recipient} • {listing["slug"]} • {type(exc).__name__}; автоматического повтора нет')
                     else:
+                        self.peer_success(slot)
                         outcome(listing, 'отправлено')
                         store.status(listing['slug'], 'sent')
                         self.log(f'Отправлено • аккаунт {slot+1} → @{recipient} • {listing["slug"]}')
@@ -977,13 +1038,13 @@ class App:
                 await asyncio.sleep(watcher.POLL_INTERVAL)
         except AccountScanError as exc:
             if isinstance(exc.cause, PeerFloodError):
-                self.mark_peer_flood(exc.slot)
+                self.peer_failure(exc.slot, 'read')
             elif isinstance(exc.cause, FloodWaitError):
                 self.log(f'Telegram ограничил запросы аккаунта {exc.slot+1} на {exc.cause.seconds} сек. Сканирование остановлено.')
             else:
                 self.log(f'Ошибка: поиск аккаунта {exc.slot+1} — {type(exc.cause).__name__}. Сканирование остановлено.')
         except PeerFloodError:
-            self.mark_peer_flood(current_slot)
+            self.peer_failure(current_slot, 'read')
         except FloodWaitError as exc:
             self.log(f'Telegram ограничил запросы на {exc.seconds} сек. Сканирование остановлено.')
         finally:
