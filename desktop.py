@@ -8,10 +8,17 @@ from pathlib import Path
 import queue
 import re
 import threading
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
-from tkinter import font as tkfont
-from PIL import Image, ImageTk, ImageOps, ImageDraw
+from PIL import Image, ImageOps, ImageDraw
+try:
+    import tkinter as tk
+    from tkinter import ttk, messagebox, filedialog
+    from tkinter import font as tkfont
+    from PIL import ImageTk
+except ImportError:
+    # Qt and the headless controller reuse the backend without a Tk installation.
+    from types import SimpleNamespace
+    tk = SimpleNamespace(Canvas=object)
+    ttk = messagebox = filedialog = tkfont = ImageTk = None
 
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, SessionPasswordNeededError, ApiIdInvalidError, PeerFloodError, UserPrivacyRestrictedError, UserIsBlockedError
@@ -21,6 +28,7 @@ from offers import OfferStore, command
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / 'data'
 DATA.mkdir(exist_ok=True)
+SEND_COOLDOWN_SECONDS = 15
 
 
 def read_settings(path, default):
@@ -531,6 +539,21 @@ class App:
     def peer_success(self, slot, phase='send'):
         if hasattr(self, 'peer_streaks'): self.peer_streaks.pop((slot, phase), None)
 
+    async def send_with_cooldown(self, client, recipient, text):
+        if not hasattr(self, '_send_lock'): self._send_lock = asyncio.Lock()
+        async with self._send_lock:
+            clock = getattr(self, 'send_clock', asyncio.get_running_loop().time)
+            sleeper = getattr(self, 'send_sleep', asyncio.sleep)
+            now = clock()
+            wait = max(0, getattr(self, '_next_send_at', 0) - now)
+            if wait:
+                self.log(f'Очередь отправки: ожидание {wait:.0f} сек. (общий интервал 15 сек.)')
+                await sleeper(wait)
+            try:
+                return await client.send_message(recipient, text, parse_mode=None)
+            finally:
+                self._next_send_at = clock() + SEND_COOLDOWN_SECONDS
+
     def background_panel(self, parent):
         frame = tk.Frame(parent, background='#edf3f8', padx=10, pady=10)
         background = tk.Label(frame, background='#edf3f8', borderwidth=0)
@@ -1005,7 +1028,7 @@ class App:
                         store.status(listing['slug'], 'preview')
                         continue
                     try:
-                        await clients[slot].send_message(recipient, text, parse_mode=None)
+                        await self.send_with_cooldown(clients[slot], recipient, text)
                     except PeerFloodError:
                         store.status(listing['slug'], 'failed')
                         outcome(listing, 'временный отказ Telegram')
@@ -1029,7 +1052,6 @@ class App:
                         outcome(listing, 'отправлено')
                         store.status(listing['slug'], 'sent')
                         self.log(f'Отправлено • аккаунт {slot+1} → @{recipient} • {listing["slug"]}')
-                    await asyncio.sleep(max(1, watcher.SEND_DELAY_SECONDS))
                 for title, counts in sorted(outcomes.items()):
                     self.log(f'Результат {title}: ' + '; '.join(f'{reason}: {count}' for reason, count in counts.items()))
                 if dropped:

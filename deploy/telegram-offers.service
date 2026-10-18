@@ -1,0 +1,17 @@
+[Unit]
+Description=Telegram Offers controller
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/telegramoffers10accountui
+EnvironmentFile=%h/.config/telegram-offers/bot.env
+ExecStart=%h/telegramoffers10accountui/.venv/bin/python -u %h/telegramoffers10accountui/bot_runner.py --no-input
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=45
+UMask=0077
+
+[Install]
+WantedBy=default.target
