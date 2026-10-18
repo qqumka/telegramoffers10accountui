@@ -6,6 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 import urllib.error
+import ssl
+import socket
+import io
 
 import desktop
 from bot_runner import Controller, DEFAULT_ADMIN_ID, BotAPI, BotError
@@ -94,6 +97,30 @@ class BotControl(unittest.IsolatedAsyncioTestCase):
                 await BotAPI(token).call('getMe')
         self.assertNotIn(token, str(failure.exception))
         self.assertEqual(failure.exception.code, 401)
+
+    async def test_temporary_read_failure_retries_with_verified_tls(self):
+        api = BotAPI('dummy-private-token')
+        response = io.BytesIO(b'{"ok":true,"result":{"id":1}}')
+        with patch('urllib.request.urlopen', side_effect=[urllib.error.URLError(TimeoutError()), response]) as request, patch('bot_runner.asyncio.sleep', AsyncMock()) as wait:
+            self.assertEqual(await api.call('getMe'), {'id': 1})
+        self.assertEqual(request.call_count, 2)
+        wait.assert_awaited_once_with(1)
+        self.assertEqual(request.call_args.kwargs['context'].verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(request.call_args.kwargs['context'].check_hostname)
+
+    async def test_delivery_timeout_is_not_automatically_retried(self):
+        with patch('urllib.request.urlopen', side_effect=urllib.error.URLError(TimeoutError())) as request:
+            with self.assertRaises(BotError) as failure:
+                await BotAPI('dummy-private-token').call('sendMessage', chat_id=1, text='test')
+        self.assertEqual(request.call_count, 1)
+        self.assertIn('Таймаут', str(failure.exception))
+
+    def test_tls_and_dns_failures_have_distinct_safe_diagnostics(self):
+        tls = BotAPI.connection_error(urllib.error.URLError(ssl.SSLCertVerificationError(1, 'dummy-private-token')))
+        dns = BotAPI.connection_error(urllib.error.URLError(socket.gaierror()))
+        self.assertIn('TLS', str(tls)); self.assertFalse(tls.retryable)
+        self.assertIn('DNS', str(dns)); self.assertTrue(dns.retryable)
+        self.assertNotIn('dummy-private-token', str(tls))
 
 
 if __name__ == '__main__': unittest.main()

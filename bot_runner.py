@@ -9,9 +9,12 @@ import os
 import queue
 import re
 import secrets
+import socket
+import ssl
 import time
 import urllib.error
 import urllib.request
+import certifi
 
 import desktop as core
 from runtime import Backend
@@ -22,31 +25,59 @@ HELP = ('Telegram Offers\n\n/run — запустить поиск\n/pause — �
 
 
 class BotError(Exception):
-    def __init__(self, message, code=None):
-        self.code = code
+    def __init__(self, message, code=None, retryable=False):
+        self.code, self.retryable = code, retryable
         super().__init__(message)
 
 
 class BotAPI:
     def __init__(self, token):
         self.token = token
+        self.context = ssl.create_default_context()
+        self.context.load_verify_locations(cafile=certifi.where())
+
+    @staticmethod
+    def connection_error(exc):
+        reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            return BotError('TLS: не удалось проверить сертификат api.telegram.org. Проверьте дату Mac, сертификаты Python и настройки HTTPS-прокси; проверка TLS включена.')
+        if isinstance(reason, ssl.SSLError):
+            return BotError('TLS: не удалось установить защищённое соединение с api.telegram.org. Проверьте VPN или HTTPS-прокси.')
+        if isinstance(reason, socket.gaierror):
+            return BotError('DNS: не удалось определить адрес api.telegram.org. Проверьте DNS и VPN.', retryable=True)
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            return BotError('Таймаут подключения к api.telegram.org. Проверьте доступность Telegram через вашу сеть или VPN.', retryable=True)
+        if isinstance(reason, ConnectionRefusedError):
+            return BotError('Соединение с api.telegram.org отклонено. Проверьте сеть, прокси и VPN.', retryable=True)
+        return BotError('Сеть: api.telegram.org недоступен (' + type(reason).__name__ + '). Проверьте сеть, VPN и прокси.', retryable=True)
 
     async def call(self, method, **parameters):
         def request():
             body = json.dumps(parameters).encode()
             req = urllib.request.Request(f'https://api.telegram.org/bot{self.token}/{method}', data=body, headers={'Content-Type': 'application/json'})
             try:
-                with urllib.request.urlopen(req, timeout=35) as response:
+                with urllib.request.urlopen(req, timeout=35, context=self.context) as response:
                     result = json.load(response)
             except urllib.error.HTTPError as exc:
                 code = exc.code; exc.close()
-                raise BotError(f'Telegram HTTP {code}', code) from None
-            except (OSError, ValueError):
-                raise BotError('Telegram: ошибка сети или ответа') from None
+                hints = {401: 'токен неверен или отозван', 403: 'доступ запрещён', 409: 'уже работает другой процесс бота или установлен webhook'}
+                raise BotError(f'Telegram HTTP {code}: {hints.get(code, "запрос отклонён")}', code, retryable=code >= 500) from None
+            except OSError as exc:
+                raise self.connection_error(exc) from None
+            except ValueError:
+                raise BotError('Ответ api.telegram.org не является JSON. Возможна страница блокировки сети или прокси.', retryable=True) from None
+            if not isinstance(result, dict):
+                raise BotError('Некорректный формат ответа api.telegram.org')
             if not result.get('ok'):
                 raise BotError(f'Telegram API: код {result.get("error_code", "unknown")}', result.get('error_code'))
             return result['result']
-        return await asyncio.to_thread(request)
+        # Retrying delivery after a timeout could duplicate messages; only reads retry.
+        attempts = 3 if method in ('getMe', 'getUpdates') else 1
+        for attempt in range(attempts):
+            try: return await asyncio.to_thread(request)
+            except BotError as exc:
+                if not exc.retryable or attempt + 1 == attempts: raise
+                await asyncio.sleep(1 + attempt*2)
 
 
 class Controller:
@@ -315,8 +346,16 @@ def main():
     parser = argparse.ArgumentParser(description='Telegram Offers — управление без окна через Telegram-бота (macOS/Linux).')
     parser.add_argument('--login', type=int, choices=range(1, 11), metavar='1..10', help='локально авторизовать слот и выйти; токен бота не нужен')
     parser.add_argument('--no-input', action='store_true', help='не спрашивать значения, использовать переменные окружения')
+    parser.add_argument('--check-network', action='store_true', help='проверить HTTPS Telegram без токена и API-ключей')
     args = parser.parse_args()
     try:
+        if args.check_network:
+            async def check_network():
+                try: await BotAPI('0:network-diagnostic').call('getMe')
+                except BotError as exc:
+                    if exc.code not in (401, 404): raise
+                print('HTTPS api.telegram.org доступен; проверка сертификатов включена. Токен не использовался.')
+            asyncio.run(check_network()); return 0
         core.DATA.chmod(0o700)
         with process_lock(): asyncio.run(launch(args))
     except KeyboardInterrupt: print('Контроллер остановлен.')
