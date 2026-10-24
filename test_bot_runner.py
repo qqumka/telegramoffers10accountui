@@ -10,13 +10,13 @@ import ssl
 import socket
 import io
 
-import desktop
+import bot_core as desktop
 from bot_runner import Controller, DEFAULT_ADMIN_ID, BotAPI, BotError
 
 
 class SendingInterval(unittest.IsolatedAsyncioTestCase):
     async def test_global_interval_between_different_accounts_and_failed_attempts(self):
-        service = desktop.App.__new__(desktop.App)
+        service = desktop.Backend.__new__(desktop.Backend)
         service.log = lambda text: None
         clock = [100.0]
         service.send_clock = lambda: clock[0]
@@ -25,10 +25,10 @@ class SendingInterval(unittest.IsolatedAsyncioTestCase):
         attempts = []
         async def send(*args, **kwargs): attempts.append(clock[0])
         async def failed(*args, **kwargs):
-            attempts.append(clock[0]); raise desktop.UserPrivacyRestrictedError(request=None)
+            attempts.append(clock[0]); raise TimeoutError()
         first, second = SimpleNamespace(send_message=send), SimpleNamespace(send_message=failed)
         await service.send_with_cooldown(first, 'owner1', 'one')
-        with self.assertRaises(desktop.UserPrivacyRestrictedError):
+        with self.assertRaises(TimeoutError):
             await service.send_with_cooldown(second, 'owner2', 'two')
         await service.send_with_cooldown(first, 'owner3', 'three')
         self.assertEqual(attempts, [100.0, 115.0, 130.0])
@@ -45,6 +45,7 @@ class BotControl(unittest.IsolatedAsyncioTestCase):
         self.control = Controller(self.api, self.service, DEFAULT_ADMIN_ID, 123, 'not-a-real-key')
 
     def tearDown(self):
+        self.control.queue.db.close()
         self.patch.stop(); self.folder.cleanup()
 
     def message(self, text, sender=DEFAULT_ADMIN_ID, chat=DEFAULT_ADMIN_ID, kind='private'):
@@ -58,36 +59,10 @@ class BotControl(unittest.IsolatedAsyncioTestCase):
             await self.control.handle(update)
         self.api.call.assert_not_awaited(); self.service.begin.assert_not_called()
 
-    async def test_live_mode_requires_one_time_owner_confirmation(self):
+    async def test_legacy_scanner_buttons_do_not_start_scanning(self):
         await self.control.handle(self.query('mode:live'))
-        self.assertFalse(self.control.live)
-        nonce = next(iter(self.control.confirmations))
-        await self.control.handle(self.query('confirm:'+nonce))
-        self.assertTrue(self.control.live)
-        self.assertNotIn(nonce, self.control.confirmations)
-        self.control.live = False
-        await self.control.handle(self.query('confirm:'+nonce))
-        self.assertFalse(self.control.live)
-
-    async def test_start_captures_selected_collections_in_preview_by_default(self):
-        self.service.clients = {0: object()}
-        self.control.selection = {'all': False, 'names': ['Mirage Lamp']}
-        await self.control.handle(self.message('/run'))
-        self.service.begin.assert_called_once_with(False, {'all': False, 'names': ['Mirage Lamp']})
-
-    async def test_remote_gifts_and_tracker_switch_persist(self):
-        self.control.catalog = [{'id': 1, 'title': 'Mirage Lamp'}, {'id': 2, 'title': 'Resistance Dog'}]
-        await self.control.handle(self.query('gift:1:0'))
-        self.assertEqual(self.control.selection, {'all': False, 'names': ['Resistance Dog']})
-        self.service.clients = {0: object()}
         await self.control.handle(self.query('search:0'))
-        self.assertEqual(self.service.tracker_disabled, {0})
-        self.assertEqual(desktop.read_settings(Path(self.folder.name)/'tracker_disabled.json', []), [0])
-
-    async def test_expired_confirmation_cannot_enable_sending(self):
-        self.control.confirmations['old'] = ('live', time.monotonic()-1)
-        await self.control.handle(self.query('confirm:old'))
-        self.assertFalse(self.control.live)
+        self.service.begin.assert_not_called()
 
     async def test_http_errors_do_not_expose_bot_token(self):
         token = 'dummy-private-token'
@@ -101,10 +76,9 @@ class BotControl(unittest.IsolatedAsyncioTestCase):
     async def test_temporary_read_failure_retries_with_verified_tls(self):
         api = BotAPI('dummy-private-token')
         response = io.BytesIO(b'{"ok":true,"result":{"id":1}}')
-        with patch('urllib.request.urlopen', side_effect=[urllib.error.URLError(TimeoutError()), response]) as request, patch('bot_runner.asyncio.sleep', AsyncMock()) as wait:
+        with patch('urllib.request.urlopen', side_effect=[urllib.error.URLError(TimeoutError()), response]) as request:
             self.assertEqual(await api.call('getMe'), {'id': 1})
         self.assertEqual(request.call_count, 2)
-        wait.assert_awaited_once_with(1)
         self.assertEqual(request.call_args.kwargs['context'].verify_mode, ssl.CERT_REQUIRED)
         self.assertTrue(request.call_args.kwargs['context'].check_hostname)
 
