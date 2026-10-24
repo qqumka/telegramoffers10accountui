@@ -205,6 +205,17 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('uncertain: 1', self.c.queue.summary())
         self.assertEqual(self.c.queue.next()[1], 'person1')
 
+    async def test_floodwait_during_recipient_check_stops_queue(self):
+        items=[]
+        for i in range(2):
+            item=parse_line(f'@person{i} Cat #{i+1} 425 gram ru'); item['owner_id']=100+i; items.append(item)
+        self.c.queue.add(items)
+        self.clients[0].get_entity.side_effect=desktop.FloodWaitError(request=None,capture=60)
+        await self.c.send_queue()
+        self.service.send_with_cooldown.assert_not_awaited()
+        self.assertEqual(self.c.queue.next()[1],'person1')
+        self.assertIn('failed: 1',self.c.queue.summary())
+
     async def test_ambiguous_result_not_retried(self):
         await self.message('@person1 Scared Cat #16951 425 gram')
         await self.message('/enqueue')

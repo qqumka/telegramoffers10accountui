@@ -197,6 +197,13 @@ class Controller:
                     entity = await client.get_entity(recipient)
                     if entity.id != owner_id: raise ValueError('Получатель изменился')
                 except asyncio.CancelledError: raise
+                except core.FloodWaitError as exc:
+                    self.queue.finish(ident, 'failed')
+                    self.queue.log(f'FloodWait {exc.seconds} сек. при проверке получателя; очередь остановлена'); return
+                except core.PeerFloodError:
+                    self.service.peer_failure(slot)
+                    self.queue.finish(ident, 'failed')
+                    self.queue.log(f'PeerFlood при проверке @{recipient}: аккаунт {slot+1}'); continue
                 except Exception as exc:
                     self.queue.finish(ident, 'failed')
                     self.queue.log(f'Не отправлено @{recipient}: {type(exc).__name__}'); continue
@@ -351,7 +358,7 @@ def process_lock():
     import fcntl
     with (core.DATA / 'controller.lock').open('a') as handle:
         try: fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError: raise RuntimeError('Бот уже запущен с этой папкой data') from None
+        except BlockingIOError: raise RuntimeError('Папка data уже используется другим процессом') from None
         try: yield
         finally: fcntl.flock(handle, fcntl.LOCK_UN)
 

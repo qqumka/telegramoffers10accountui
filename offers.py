@@ -1,18 +1,4 @@
-import re
 import sqlite3
-
-
-def command(title, number, price):
-    title = ' '.join(str(title or '').split())
-    if not title or not re.fullmatch(r'[1-9][0-9]*', str(number)):
-        raise ValueError('Нет названия или номера подарка')
-    match = re.fullmatch(r'([1-9][0-9]*) XTR', price)
-    if not match:
-        raise ValueError('Лот должен иметь только цену в Stars')
-    amount = int(match[1]) * 95 // 100
-    if amount < 1:
-        raise ValueError('Цена предложения меньше одной звезды')
-    return f'jdcsnjdc {title} #{number} {amount} stars ru'
 
 
 class OfferStore:

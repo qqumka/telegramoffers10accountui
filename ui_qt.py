@@ -1,4 +1,4 @@
-"""Qt desktop interface; scanner and account operations reuse the tested backend."""
+"""Qt desktop studio for manual NFT offers and a shared persistent queue."""
 import asyncio
 from collections import deque
 import html
@@ -8,18 +8,20 @@ import queue
 import re
 import sys
 import threading
+import time
 
 from PySide6.QtCore import Qt, QTimer, QRectF, QPointF, QPropertyAnimation
 from PySide6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QFrame, QLabel,
     QPushButton, QVBoxLayout, QHBoxLayout, QGridLayout, QLineEdit, QCheckBox,
     QScrollArea, QTextEdit, QDialog, QFileDialog, QMessageBox, QStackedWidget,
-    QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QButtonGroup)
-from PIL import Image, ImageOps
-import desktop as core
+    QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QButtonGroup, QTableWidget,
+    QTableWidgetItem, QHeaderView, QComboBox, QAbstractItemView)
+import bot_core as core
 
 DATA = core.DATA
-from runtime import Backend, Value, TEST_RECIPIENT, TEST_MESSAGE
+from runtime import Backend
+from manual_queue import render
 
 
 def icon(name, color='#727780'):
@@ -95,9 +97,9 @@ class Hero(QWidget):
     def __init__(self):
         super().__init__(); self.cover = QPixmap(); self.setMinimumHeight(200)
         box = QVBoxLayout(self); box.setContentsMargins(28, 24, 28, 24)
-        self.eyebrow = QLabel('TELEGRAM OFFERS  /  ВАША КОЛЛЕКЦИЯ ВОЗМОЖНОСТЕЙ'); self.eyebrow.setObjectName('heroSmall')
-        self.title = QLabel('Новые находки.\nПод вашим контролем.'); self.title.setObjectName('heroTitle')
-        self.note = QLabel('Только Stars. Точные предложения. Всё в одном месте.'); self.note.setObjectName('heroNote')
+        self.eyebrow = QLabel('TELEGRAM OFFERS  /  РУЧНАЯ ОЧЕРЕДЬ NFT'); self.eyebrow.setObjectName('heroSmall')
+        self.title = QLabel('Ваш список.\nТочные предложения.'); self.title.setObjectName('heroTitle')
+        self.note = QLabel('Одна цена для списка. Проверка каждой строки. Отправка под вашим контролем.'); self.note.setObjectName('heroNote')
         box.addWidget(self.eyebrow); box.addStretch(); box.addWidget(self.title); box.addWidget(self.note)
     def paintEvent(self, event):
         p = QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -176,294 +178,257 @@ def card():
     return result, box
 
 
+STATUS = {'pending': 'Ожидает', 'sending': 'Отправляется', 'sent': 'Отправлено', 'failed': 'Не отправлено', 'uncertain': 'Результат не подтверждён'}
+STYLE += '''
+QTableWidget { background: #ffffff; border: 1px solid #e5e6e9; border-radius: 10px; gridline-color: #eceef1; selection-background-color: #faf1d6; selection-color: #292c32; }
+QHeaderView::section { background: #f5f6f8; padding: 10px; border: none; color: #777d89; font-weight: 600; }
+QTableWidget::item { padding: 7px; }
+QPushButton[role="primary"]:disabled, QPushButton[role="danger"]:disabled { color: #b2b5bd; background: #f2f3f4; border-color: #e9eaed; }
+QComboBox { border: 1px solid #e1e4e9; border-radius: 8px; padding: 7px; background: white; }
+QTextEdit#input { background: #f7f8fa; border: 1px solid #e1e4e9; border-radius: 12px; padding: 12px; }
+'''
+
+
 class Window(QMainWindow):
-    def __init__(self):
-        super().__init__(); self.setWindowTitle('Telegram Offers'); self.resize(1180, 850); self.setMinimumSize(1000, 730)
-        self.backend = Backend(); self.history = deque(maxlen=2500); self.catalog = []
-        self.tracker_disabled = set(self.backend.tracker_disabled)
-        self.accounts, self.statuses, self.connected = set(), {}, set()
-        self.auth_dialogs = {}; self.detached = None; self.closing = False; self.closed = False
-        selection = core.read_settings(DATA / 'gifts.json', {'all': True, 'names': []})
-        self.selection = selection if isinstance(selection, dict) and isinstance(selection.get('all'), bool) and isinstance(selection.get('names'), list) and all(isinstance(name, str) for name in selection['names']) else {'all': True, 'names': []}
-        shell = QWidget(); layout = QHBoxLayout(shell); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(0); self.setCentralWidget(shell)
-        sidebar = QFrame(); sidebar.setObjectName('sidebar'); sidebar.setFixedWidth(215)
-        side = QVBoxLayout(sidebar); side.setContentsMargins(22, 28, 22, 24); side.setSpacing(8)
-        side.addWidget(label('Telegram\nOffers', 'brand')); side.addWidget(label('ВАША РАБОЧАЯ СТУДИЯ', 'sideNote')); side.addSpacing(28)
-        self.nav_group = QButtonGroup(self); self.nav_group.setExclusive(True)
-        self.stack = QStackedWidget()
-        for i, (name, symbol) in enumerate((('Обзор', 'overview'), ('Аккаунты', 'accounts'), ('Подарки', 'gifts'), ('Журнал', 'logs'), ('Настройки', 'settings'))):
-            item = button(name, lambda index=i: self.navigate(index), 'nav')
-            item.setIcon(icon(symbol, '#a5a8b2')); item.setCheckable(True); self.nav_group.addButton(item, i); side.addWidget(item)
-        self.nav_group.button(0).setChecked(True)
-        side.addStretch(); self.side_status = label('●  Предпросмотр', 'sideNote'); side.addWidget(self.side_status)
-        side.addWidget(button('Окно логов', self.open_logs, 'nav'))
-        side.addWidget(label('До 10 аккаунтов\nТолько подарки за Stars', 'sideNote'))
-        layout.addWidget(sidebar)
-        self.wallpaper = Wallpaper(); content = QVBoxLayout(self.wallpaper); content.setContentsMargins(28, 24, 28, 24); content.addWidget(self.stack); layout.addWidget(self.wallpaper, 1)
-        self.create_overview(); self.create_accounts(); self.create_gifts(); self.create_logs(); self.create_settings()
-        for i in range(10):
-            if (DATA / f'account_{i+1}.session').exists():
-                self.accounts.add(i); self.statuses[i] = 'Сохранённая сессия'
-        self.render_accounts(); self.render_gifts(); self.update_metrics(); self.load_cover()
+    def __init__(self, backend=None):
+        super().__init__()
+        self.setWindowTitle('Telegram Offers · Списки и очередь')
+        self.resize(1280, 920); self.setMinimumSize(1060, 740)
+        self.backend = backend or Backend()
+        self.state = {}; self.draft_signature = None; self.dirty = False
+        self.auth_dialogs = {}; self.closing = self.closed = False; self.futures = []
+        shell = QWidget(); layout = QHBoxLayout(shell); layout.setContentsMargins(0,0,0,0); layout.setSpacing(0)
+        self.setCentralWidget(shell)
+        sidebar = QFrame(); sidebar.setObjectName('sidebar'); sidebar.setFixedWidth(210)
+        side = QVBoxLayout(sidebar); side.setContentsMargins(22,28,22,24); side.setSpacing(8)
+        side.addWidget(label('Telegram\nOffers','brand')); side.addWidget(label('СПИСКИ · ПРОВЕРКА · ОТПРАВКА','sideNote')); side.addSpacing(24)
+        self.stack = QStackedWidget(); self.nav_group = QButtonGroup(self); self.nav_group.setExclusive(True)
+        for i,(name,symbol) in enumerate((('Подготовка','overview'),('Очередь','play'),('Аккаунты','accounts'),('История','gifts'),('Логи','logs'),('Настройки','settings'))):
+            item = button(name,lambda index=i: self.navigate(index),'nav')
+            item.setIcon(icon(symbol,'#a5a8b2')); item.setCheckable(True); side.addWidget(item); self.nav_group.addButton(item,i)
+        side.addStretch(); self.side_status = label('●  Загрузка…','sideNote'); side.addWidget(self.side_status)
+        side.addWidget(label('До 10 аккаунтов\nОбщий интервал: 15 секунд','sideNote')); layout.addWidget(sidebar)
+        self.wallpaper = Wallpaper(); box = QVBoxLayout(self.wallpaper); box.setContentsMargins(24,22,24,16); box.addWidget(self.stack)
+        self.notice = label('Вставьте результаты парсера и задайте итоговую цену.','muted'); box.addWidget(self.notice)
+        layout.addWidget(self.wallpaper,1)
+        self.create_prepare(); self.create_queue(); self.create_accounts(); self.create_history(); self.create_logs(); self.create_settings()
+        self.navigate(0); self.load_cover()
         self.timer = QTimer(self); self.timer.timeout.connect(self.drain); self.timer.start(100)
 
-    def page(self, title, subtitle):
-        widget = QWidget(); box = QVBoxLayout(widget); box.setContentsMargins(0, 0, 0, 0); box.setSpacing(20)
-        header = QHBoxLayout(); texts = QVBoxLayout(); texts.setSpacing(6); texts.addWidget(label(title, 'pageTitle')); texts.addWidget(label(subtitle, 'subtitle')); header.addLayout(texts, 1); box.addLayout(header)
-        self.stack.addWidget(widget)
-        return widget, box, header
+    def page(self,title,subtitle):
+        page = QWidget(); box = QVBoxLayout(page); box.setContentsMargins(0,0,0,0); box.setSpacing(14)
+        box.addWidget(label(title,'pageTitle')); box.addWidget(label(subtitle,'subtitle')); self.stack.addWidget(page)
+        return box
 
-    def navigate(self, index):
-        self.nav_group.button(index).setChecked(True)
-        if self.stack.currentIndex() == index: return
-        if getattr(self, 'transition', None) is not None:
-            try: self.fade.stop(); self.transition.hide(); self.transition.deleteLater()
-            except RuntimeError: pass
-        snapshot = self.stack.grab()
-        self.stack.setCurrentIndex(index)
-        overlay = self.transition = QLabel(self.stack); overlay.setPixmap(snapshot); overlay.setGeometry(self.stack.rect()); overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents); overlay.show(); overlay.raise_()
-        effect = QGraphicsOpacityEffect(overlay); overlay.setGraphicsEffect(effect)
-        self.fade = QPropertyAnimation(effect, b'opacity', overlay); self.fade.setDuration(180); self.fade.setStartValue(1); self.fade.setEndValue(0); self.fade.finished.connect(overlay.deleteLater); self.fade.start()
+    def navigate(self,index):
+        self.stack.setCurrentIndex(index); self.nav_group.button(index).setChecked(True)
 
-    def create_overview(self):
-        _, box, head = self.page('Обзор', 'Спокойный рабочий процесс. Все важные события — перед вами.')
-        self.mode_badge = label('ПРЕДПРОСМОТР', 'badge'); self.mode_badge.setMaximumHeight(30); head.addWidget(self.mode_badge)
-        self.hero = Hero(); box.addWidget(self.hero)
-        metrics = QHBoxLayout(); metrics.setSpacing(14); self.metric_values = []
-        for caption in ('Подключено аккаунтов', 'Коллекции в поиске', 'Отправлено за запуск'):
-            item, inner = card(); inner.addWidget(label(caption, 'muted')); value = label('0', 'metric'); inner.addWidget(value); self.metric_values.append(value); metrics.addWidget(item)
-        box.addLayout(metrics); self.sent = 0
-        controls, inner = card(); row = QHBoxLayout(); self.live = Check('Отправка сообщений'); self.live.toggled.connect(self.update_metrics); row.addWidget(self.live); row.addStretch()
-        self.start_button = button('Запустить', self.start, 'primary', 'play'); self.pause_button = button('Пауза', lambda: self.backend.loop.call_soon_threadsafe(self.backend.pause), symbol='pause'); self.stop_button = button('Стоп', lambda: self.backend.loop.call_soon_threadsafe(self.backend.stop), symbol='stop')
-        self.test_button = button('Пробное', self.send_test)
-        for item in (self.test_button, self.start_button, self.pause_button, self.stop_button): row.addWidget(item)
-        inner.addLayout(row); inner.addWidget(label('Первый круг запоминает рынок. Со второго — только новые находки.', 'muted')); box.addWidget(controls)
-        events, inner = card(); top = QHBoxLayout(); top.addWidget(label('Последние события')); top.addStretch(); top.addWidget(button('Все логи', lambda: self.navigate(3))); inner.addLayout(top)
-        self.preview_log = QTextEdit(); self.preview_log.setReadOnly(True); self.preview_log.setPlaceholderText('События появятся здесь после запуска сканирования.'); self.preview_log.document().setMaximumBlockCount(250); inner.addWidget(self.preview_log); box.addWidget(events, 1)
+    def table(self, headers, editable=False):
+        table = QTableWidget(0,len(headers)); table.setHorizontalHeaderLabels(headers)
+        table.verticalHeader().setVisible(False); table.verticalHeader().setDefaultSectionSize(43)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        table.setWordWrap(False); table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        if not editable: table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        return table
+
+    def create_prepare(self):
+        box = self.page('Подготовка сообщений','Вставьте результаты парсера целиком. Проверьте цену и язык перед добавлением в очередь.')
+        self.hero = Hero(); self.hero.setMinimumHeight(150); box.addWidget(self.hero)
+        panel, inner = card()
+        self.input_text = QTextEdit(); self.input_text.setObjectName('input'); self.input_text.setAcceptRichText(False)
+        self.input_text.setPlaceholderText('✅ Результаты (14)\n1. [T] [⭐ Lv.1] @username - Scared Cat (#16951) (+1)\n\nИли: @username Scared Cat #16951 425 gram')
+        self.input_text.setMinimumHeight(100); self.input_text.setMaximumHeight(160); inner.addWidget(self.input_text)
+        row = QHBoxLayout(); self.price = QLineEdit(); self.price.setPlaceholderText('Общая итоговая цена: 425 gram'); row.addWidget(self.price,1)
+        self.import_button = button('Разобрать список',self.import_list,'primary'); row.addWidget(self.import_button)
+        row.addWidget(button('Применить цену',self.apply_price)); inner.addLayout(row)
+        self.import_hint = label('Цена применяется к каждой строке. Пометка (+1) не добавляет NFT без номера.','muted'); inner.addWidget(self.import_hint); box.addWidget(panel)
+        self.draft_title = label('Черновик · 0 получателей'); box.addWidget(self.draft_title)
+        self.draft_table = self.table(['Получатель','NFT','Номер','Цена, gram','Язык','Сообщение'],True)
+        for col,width in enumerate((145,145,80,100,85)):
+            self.draft_table.horizontalHeader().setSectionResizeMode(col,QHeaderView.ResizeMode.Interactive)
+            self.draft_table.setColumnWidth(col,width)
+        self.draft_table.setMinimumHeight(150); self.draft_table.itemChanged.connect(self.draft_changed)
+        box.addWidget(self.draft_table,1)
+        controls = QHBoxLayout(); self.cancel_button = button('Удалить черновик',self.cancel_draft,'danger'); controls.addWidget(self.cancel_button)
+        controls.addStretch(); self.save_button = button('Сохранить правки',self.save_draft); controls.addWidget(self.save_button)
+        self.enqueue_button = button('Подтвердить → в очередь',self.enqueue,'primary'); controls.addWidget(self.enqueue_button); box.addLayout(controls)
+
+    def create_queue(self):
+        box = self.page('Очередь отправки','Одна очередь для всех аккаунтов. После остановки или перезапуска оставшиеся строки сохраняются.')
+        row = QHBoxLayout(); self.queue_summary = label('Очередь пуста','badge'); row.addWidget(self.queue_summary); row.addStretch()
+        self.start_button = button('Начать отправку',lambda: self.action('command','/run'),'primary','play')
+        self.pause_button = button('Пауза',lambda: self.action('command','/pause'),symbol='pause')
+        self.stop_button = button('Стоп',lambda: self.action('command','/stop'),symbol='stop')
+        for item in (self.start_button,self.pause_button,self.stop_button): row.addWidget(item)
+        box.addLayout(row); box.addWidget(label('Общий интервал ≥ 15 секунд · аккаунты по кругу · повторные отправки исключены','muted'))
+        self.queue_table = self.table(['№','Получатель','Сообщение','Статус','Аккаунт'])
+        for col in (0,1,3,4): self.queue_table.horizontalHeader().setSectionResizeMode(col,QHeaderView.ResizeMode.ResizeToContents)
+        box.addWidget(self.queue_table,1)
+        box.addWidget(label('Показаны последние 500 записей. Неподтверждённые результаты и ошибки не отправляются повторно автоматически.','muted'))
 
     def create_accounts(self):
-        _, box, head = self.page('Аккаунты', 'Включите «Поиск» на нужных аккаунтах. Коллекции делятся между ними параллельно.')
-        head.addWidget(button('Добавить аккаунт', self.add_account, 'primary', 'plus'))
-        self.account_area = QScrollArea(); self.account_area.setWidgetResizable(True); self.account_body = QWidget(); self.account_box = QVBoxLayout(self.account_body); self.account_box.setContentsMargins(2, 2, 8, 10); self.account_box.setSpacing(12); self.account_area.setWidget(self.account_body); box.addWidget(self.account_area)
+        box = self.page('Аккаунты','Подключите сохранённые сессии или добавьте новый аккаунт. До 10 слотов для отправки по кругу.')
+        row = QHBoxLayout(); row.addWidget(button('Добавить аккаунт',self.add_account,'primary','plus'))
+        row.addWidget(button('Подключить сохранённые',lambda: self.action('connect_all',self.api_id.text(),self.api_hash.text()))); row.addStretch(); box.addLayout(row)
+        self.account_table = self.table(['Слот','Состояние','Подключение','Действие']); box.addWidget(self.account_table,1)
+        box.addWidget(label('API ID и API Hash вводятся в настройках. Коды и пароль 2FA — только в окне входа.','muted'))
 
-    def render_accounts(self):
-        self.clear_layout(self.account_box)
-        if not self.accounts:
-            empty, inner = card(); inner.setContentsMargins(30, 45, 30, 45); inner.addWidget(label('Начните с первого аккаунта', 'pageTitle')); inner.addWidget(label('Войдите по номеру телефона — код и пароль 2FA вводятся в отдельном окне.', 'muted')); inner.addWidget(button('Добавить аккаунт', self.add_account, 'primary', 'plus')); self.account_box.addWidget(empty)
-        for i in sorted(self.accounts):
-            item, inner = card(); row = QHBoxLayout(); avatar = label(f'{i+1:02d}'); avatar.setFixedSize(44, 44); avatar.setAlignment(Qt.AlignmentFlag.AlignCenter); avatar.setStyleSheet('background: #faf1d6; border-radius: 16px; color: #8b6b16; font-size: 17px; font-weight: 700;'); row.addWidget(avatar)
-            details = QVBoxLayout(); phone = self.backend.rows[i][0].get(); details.addWidget(label(phone or f'Аккаунт {i+1}'))
-            limited = i in self.backend.restricted_accounts; status = label('● PeerFloodError' if limited else self.statuses.get(i, 'Не подключён'), 'muted')
-            if limited: status.setStyleSheet('color: #cc5555; font-weight: 600;')
-            details.addWidget(status); row.addLayout(details, 1)
-            search = Check('Поиск'); search.setChecked(i not in self.tracker_disabled); search.setEnabled(not limited)
-            search.setToolTip('Участвует в поиске подарков. Отправка предложений настраивается отдельно. Изменение применяется со следующего круга.')
-            search.clicked.connect(lambda enabled, slot=i: self.toggle_tracker(slot, enabled)); row.addWidget(search)
-            row.addWidget(button('Подключить', lambda slot=i: self.open_auth(slot))); row.addWidget(button('Выйти', lambda slot=i: self.logout(slot), 'danger')); inner.addLayout(row); self.account_box.addWidget(item)
-        self.account_box.addStretch()
-
-    def toggle_tracker(self, slot, enabled):
-        updated = set(self.tracker_disabled)
-        if enabled: updated.discard(slot)
-        else: updated.add(slot)
-        try: core.write_settings(DATA / 'tracker_disabled.json', sorted(updated))
-        except OSError:
-            self.warn('Не удалось сохранить переключатель поиска.'); self.render_accounts(); return
-        self.tracker_disabled = updated
-        self.backend.loop.call_soon_threadsafe(setattr, self.backend, 'tracker_disabled', set(updated))
-        self.backend.log(f'Аккаунт {slot+1}: поиск {"включён" if enabled else "выключен"}. Изменение действует со следующего круга; отправка предложений не меняется.')
-
-    def create_gifts(self):
-        _, box, head = self.page('Подарки', 'Ваш фокус. Оставьте только нужные коллекции или включите весь каталог.')
-        head.addWidget(button('Обновить каталог', self.refresh_catalog))
-        controls, inner = card(); self.all_gifts = Check('Все коллекции Telegram'); self.all_gifts.setChecked(self.selection['all']); self.all_gifts.clicked.connect(self.toggle_all); inner.addWidget(self.all_gifts)
-        self.gift_search = QLineEdit(); self.gift_search.setPlaceholderText('Найти коллекцию — например, Mirage Lamp'); self.gift_search.textChanged.connect(self.filter_gifts); inner.addWidget(self.gift_search); box.addWidget(controls)
-        self.gift_area = QScrollArea(); self.gift_area.setWidgetResizable(True); self.gift_body = QWidget(); self.gift_box = QVBoxLayout(self.gift_body); self.gift_box.setContentsMargins(4, 4, 8, 8); self.gift_box.setSpacing(8); self.gift_area.setWidget(self.gift_body); box.addWidget(self.gift_area, 1)
-        footer = QHBoxLayout(); footer.addWidget(label('Выбор применяется со следующего запуска сканирования.', 'muted')); footer.addStretch(); footer.addWidget(button('Сохранить выбор', self.save_gifts, 'primary')); box.addLayout(footer); self.gift_checks = {}
-
-    def render_gifts(self):
-        values = {name: check.isChecked() for name, check in self.gift_checks.items()}
-        self.clear_layout(self.gift_box); self.gift_checks = {}; self.gift_cards = {}
-        names = sorted(set(core.watcher.GIFT_NAME_WHITELIST) | {gift['title'] for gift in self.catalog} | set(self.selection['names']), key=str.lower)
-        for name in names:
-            item, inner = card(); inner.setContentsMargins(16, 10, 16, 10); check = Check(name); check.setMinimumHeight(30); check.setChecked(values.get(name, self.all_gifts.isChecked() or name in self.selection['names'])); check.clicked.connect(lambda checked: self.all_gifts.setChecked(False)); inner.addWidget(check); self.gift_checks[name] = check; self.gift_cards[name] = item; self.gift_box.addWidget(item)
-        self.gift_box.addStretch(); self.filter_gifts()
-
-    def filter_gifts(self):
-        text = self.gift_search.text().strip().lower()
-        for name, item in getattr(self, 'gift_cards', {}).items(): item.setVisible(text in name.lower())
-
-    def toggle_all(self):
-        for check in self.gift_checks.values(): check.setChecked(self.all_gifts.isChecked())
-
-    def save_gifts(self):
-        selection = {'all': self.all_gifts.isChecked(), 'names': sorted(name for name, check in self.gift_checks.items() if check.isChecked())}
-        try: core.write_settings(DATA / 'gifts.json', selection)
-        except OSError: self.warn('Не удалось сохранить выбор подарков.'); return
-        self.selection = selection; self.update_metrics(); self.backend.log('Выбор подарков сохранён. Применится после нового запуска.')
+    def create_history(self):
+        box = self.page('История получателей','Общая история desktop и Telegram-бота. Проверка по Telegram ID и username, включая старую базу.')
+        self.history_table = self.table(['Получатель','Telegram ID / ключ истории']); box.addWidget(self.history_table,1)
+        box.addWidget(label('История сохраняется в data. Уже обработанные получатели не добавляются повторно, даже с другим NFT. Показаны последние 500 получателей.','muted'))
 
     def create_logs(self):
-        _, box, head = self.page('Журнал', 'От находки до отправки. История каждого действия.')
-        head.addWidget(button('Отдельное окно', self.open_logs))
-        panel, inner = card(); controls = QHBoxLayout(); self.follow = Check('Автопрокрутка'); self.follow.setChecked(True); controls.addWidget(self.follow); controls.addStretch(); controls.addWidget(button('Очистить', self.clear_logs)); inner.addLayout(controls)
-        self.log_text = QTextEdit(); self.log_text.setReadOnly(True); self.log_text.document().setMaximumBlockCount(2500); inner.addWidget(self.log_text); box.addWidget(panel, 1)
+        box = self.page('Логи','Постоянный журнал загрузки списков, отправок, остановок и ошибок.')
+        self.log_text = QTextEdit(); self.log_text.setReadOnly(True); box.addWidget(self.log_text,1)
+        box.addWidget(label('Последние 250 событий. Полный журнал сохраняется в data/offers.sqlite.','muted'))
 
     def create_settings(self):
-        _, box, _ = self.page('Настройки', 'Подключение Telegram и ваше оформление рабочего пространства.')
-        panel, inner = card(); inner.addWidget(label('Telegram API')); inner.addWidget(label('API ID и API Hash из одного приложения на my.telegram.org/apps.', 'muted'))
-        fields = QHBoxLayout(); self.api_id = QLineEdit(os.getenv('TG_API_ID', '')); self.api_id.setPlaceholderText('API ID'); self.api_hash = QLineEdit(os.getenv('TG_API_HASH', '')); self.api_hash.setPlaceholderText('API Hash'); self.api_hash.setEchoMode(QLineEdit.EchoMode.Password); fields.addWidget(self.api_id, 1); fields.addWidget(self.api_hash, 2); inner.addLayout(fields)
-        inner.addWidget(label('Ключи не публикуются и не записываются в исходный код.', 'muted')); box.addWidget(panel)
-        cover, inner = card(); inner.addWidget(label('Ваша обложка')); inner.addWidget(label('Картинка появится на главном экране и станет мягким фоном страниц.', 'muted')); inner.addWidget(button('Выбрать изображение', self.choose_cover)); box.addWidget(cover); box.addStretch()
+        box = self.page('Настройки','Подключение Telegram и оформление программы.')
+        panel, inner = card(); inner.addWidget(label('Telegram API')); inner.addWidget(label('API ID и API Hash одного приложения с my.telegram.org/apps.','muted'))
+        row = QHBoxLayout(); self.api_id = QLineEdit(os.getenv('TG_API_ID','')); self.api_id.setPlaceholderText('API ID')
+        self.api_hash = QLineEdit(os.getenv('TG_API_HASH','')); self.api_hash.setPlaceholderText('API Hash'); self.api_hash.setEchoMode(QLineEdit.EchoMode.Password)
+        row.addWidget(self.api_id,1); row.addWidget(self.api_hash,2); inner.addLayout(row)
+        inner.addWidget(label('Ключи хранятся только в памяти окна. Сессии сохраняются в data.','muted')); box.addWidget(panel)
+        panel,inner = card(); inner.addWidget(label('Ваша обложка')); inner.addWidget(button('Выбрать изображение',self.choose_cover)); box.addWidget(panel)
+        box.addWidget(label('Для переключения между программой и Telegram-ботом завершите текущий процесс. Оба используют одну очередь и историю.','muted')); box.addStretch()
+
+    def action(self, action, *args):
+        future = self.backend.submit(action,*args); self.futures.append(future)
+        self.notice.setText('Выполняется…'); return future
+
+    def price_text(self):
+        value = self.price.text().strip()
+        return value if not value or value.lower().endswith('gram') else value+' gram'
+
+    def import_list(self):
+        if not self.input_text.toPlainText().strip(): self.warn('Вставьте список получателей.'); return
+        self.action('import',self.input_text.toPlainText(),self.price_text())
+
+    def apply_price(self):
+        if self.dirty: self.warn('Сначала сохраните правки таблицы.'); return
+        self.action('price',self.price_text())
+
+    def draft_rows(self):
+        rows = []
+        for row in range(self.draft_table.rowCount()):
+            values = [self.draft_table.item(row,col).text().strip() for col in range(4)]
+            rows.append(dict(zip(('recipient','title','number','price','lang'),values+[self.draft_table.cellWidget(row,4).currentText()])))
+        return rows
+
+    def save_draft(self): self.action('save',self.draft_rows())
+    def enqueue(self): self.action('save',self.draft_rows(),True)
+
+    def cancel_draft(self):
+        if QMessageBox.question(self,'Удалить черновик','Удалить текущий черновик? Очередь и история сохранятся.') == QMessageBox.StandardButton.Yes:
+            self.action('command','/cancel')
+
+    def draft_changed(self,*args):
+        self.dirty = True
+        for row,item in enumerate(self.draft_rows()):
+            self.draft_table.blockSignals(True)
+            self.draft_table.item(row,5).setText(render(item))
+            self.draft_table.blockSignals(False)
+        self.draft_title.setText(f'Черновик · {self.draft_table.rowCount()} получателей · есть несохранённые правки')
+
+    def render_draft(self,items):
+        self.draft_table.blockSignals(True); self.draft_table.setRowCount(len(items))
+        for row,item in enumerate(items):
+            for col,key in enumerate(('recipient','title','number','price')):
+                self.draft_table.setItem(row,col,QTableWidgetItem(item[key]))
+            combo = QComboBox(); combo.addItems(['ru','cn','ar']); combo.setCurrentText(item['lang']); self.draft_table.setCellWidget(row,4,combo)
+            preview = QTableWidgetItem(render(item)); preview.setFlags(preview.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.draft_table.setItem(row,5,preview)
+            combo.currentTextChanged.connect(self.draft_changed)
+        self.draft_table.blockSignals(False); self.dirty = False
+        self.draft_title.setText(f'Черновик · {len(items)} получателей')
+
+    def fill_table(self,table,rows):
+        table.setRowCount(len(rows))
+        for r,row in enumerate(rows):
+            for c,value in enumerate(row):
+                item = QTableWidgetItem(str(value or '—')); item.setToolTip(str(value or '—')); table.setItem(r,c,item)
+
+    def show_state(self,data):
+        self.state = data
+        signature = repr(data['draft'])
+        if signature != self.draft_signature:
+            self.draft_signature = signature; self.render_draft(data['draft'])
+        pending = data['pending']
+        self.import_hint.setText(f'Извлечено {pending} получателей. Укажите общую итоговую цену и нажмите «Применить цену».' if pending else 'Цена применяется к каждой строке. Язык можно изменить в таблице: cn / ar / ru.')
+        self.enqueue_button.setEnabled(bool(data['draft']) and not pending)
+        self.save_button.setEnabled(bool(data['draft'])); self.import_button.setEnabled(not data['draft'] and not pending)
+        self.cancel_button.setEnabled(bool(data['draft']) or bool(pending))
+        running = data['running']; self.start_button.setEnabled(not running and data['counts'].get('pending',0) > 0)
+        self.pause_button.setEnabled(running); self.stop_button.setEnabled(running)
+        self.pause_button.setText('Продолжить' if data['paused'] else 'Пауза')
+        self.side_status.setText('●  Пауза' if running and data['paused'] else '●  Отправка' if running else '●  Готов к работе')
+        self.queue_summary.setText(' · '.join(f'{STATUS.get(status,status)}: {count}' for status,count in data['counts'].items()) or 'Очередь пуста')
+        self.fill_table(self.queue_table,[(i,'@'+recipient,text,STATUS.get(status,status),str(slot+1) if slot is not None else '—') for i,recipient,text,status,slot in data['queue']])
+        self.fill_table(self.history_table,[('@'+recipient,key) for key,recipient in data['history']])
+        self.log_text.setPlainText('\n'.join(time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(stamp))+'  '+message for stamp,message in data['logs']))
+        self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
+        self.account_table.setRowCount(len(data['accounts']))
+        for row,item in enumerate(data['accounts']):
+            slot = item['slot']
+            self.account_table.setItem(row,0,QTableWidgetItem(str(slot+1)))
+            self.account_table.setItem(row,1,QTableWidgetItem(item['status']))
+            self.account_table.setCellWidget(row,2,button('Подключён' if item['connected'] else 'Подключить / войти',lambda i=slot: self.open_auth(i)))
+            self.account_table.setCellWidget(row,3,button('Выйти',lambda i=slot: self.logout(i),'danger'))
+            if slot in self.auth_dialogs: self.auth_dialogs[slot].status_label.setText(item['status'])
 
     def add_account(self):
-        i = next((slot for slot in range(10) if slot not in self.accounts and slot not in self.auth_dialogs), None)
-        if i is None: self.warn('Можно добавить до 10 аккаунтов. Сначала выйдите из одного из них.'); return
-        self.open_auth(i)
+        occupied = {item['slot'] for item in self.state.get('accounts',[])} | set(self.auth_dialogs)
+        slot = next((i for i in range(10) if i not in occupied),None)
+        if slot is None: self.warn('Все 10 слотов заняты.'); return
+        self.open_auth(slot)
 
-    def open_auth(self, i):
-        if i in self.auth_dialogs:
-            self.auth_dialogs[i].raise_(); self.auth_dialogs[i].activateWindow(); return
-        dialog = QDialog(self); dialog.setWindowTitle('Добавить аккаунт'); dialog.resize(430, 430); box = QVBoxLayout(dialog); box.setContentsMargins(28, 26, 28, 26); box.setSpacing(14)
-        box.addWidget(label('Вход в Telegram', 'pageTitle')); box.addWidget(label('Используйте свой номер телефона. Сохранённая сессия подключится без повторного кода.', 'muted'))
-        phone = QLineEdit(self.backend.rows[i][0].get()); phone.setPlaceholderText('+7 900 000 00 00'); code = QLineEdit(); code.setPlaceholderText('Код Telegram'); password = QLineEdit(); password.setEchoMode(QLineEdit.EchoMode.Password); password.setPlaceholderText('Пароль 2FA, если установлен')
-        box.addWidget(phone); box.addWidget(button('Получить код / подключить сессию', lambda: self.connect_account(i, phone.text()))); box.addWidget(code); box.addWidget(password)
-        status = label(self.statuses.get(i, 'Введите номер телефона'), 'muted'); box.addWidget(status)
-        def login():
-            self.backend.rows[i][1].set(code.text()); self.backend.rows[i][2].set(password.text()); self.backend.login(i)
-        box.addWidget(button('Войти', login, 'primary')); dialog.status_label = status
-        dialog.finished.connect(lambda result: self.auth_dialogs.pop(i, None)); self.auth_dialogs[i] = dialog; dialog.show()
+    def open_auth(self,slot):
+        if slot in self.auth_dialogs: self.auth_dialogs[slot].raise_(); return
+        dialog = QDialog(self); dialog.setWindowTitle(f'Аккаунт {slot+1} · Telegram'); dialog.resize(440,420)
+        box = QVBoxLayout(dialog); box.setContentsMargins(24,24,24,24); box.setSpacing(14)
+        box.addWidget(label('Вход в Telegram','pageTitle'))
+        phone = QLineEdit(); phone.setPlaceholderText('Телефон с кодом страны')
+        code = QLineEdit(); code.setPlaceholderText('Код Telegram'); code.setEchoMode(QLineEdit.EchoMode.Password)
+        password = QLineEdit(); password.setPlaceholderText('Пароль 2FA'); password.setEchoMode(QLineEdit.EchoMode.Password)
+        box.addWidget(phone); box.addWidget(button('Получить код / подключить сессию',lambda: self.action('connect',slot,self.api_id.text(),self.api_hash.text(),phone.text())))
+        box.addWidget(code); box.addWidget(password)
+        status = label('Введите API ID и Hash в настройках.','muted'); box.addWidget(status); dialog.status_label = status
+        box.addWidget(button('Войти',lambda: self.action('login',slot,code.text(),password.text()),'primary'))
+        dialog.finished.connect(lambda result: self.auth_dialogs.pop(slot,None)); self.auth_dialogs[slot] = dialog; dialog.show()
 
-    def connect_account(self, i, phone):
-        try:
-            api_id = int(self.api_id.text().strip()); api_hash = self.api_hash.text().strip()
-            if api_id <= 0 or not re.fullmatch(r'[0-9a-fA-F]{32}', api_hash): raise ValueError()
-        except ValueError:
-            self.warn('Откройте «Настройки» и введите API ID и API Hash с my.telegram.org/apps.'); return
-        self.backend.rows[i][0].set(phone.strip())
-        async def run():
-            if self.backend.testing or (self.backend.task and not self.backend.task.done()):
-                self.backend.log('Остановите сканирование перед подключением аккаунтов.'); return
-            await self.backend.connect_account(i, api_id, api_hash, phone.strip())
-        self.backend.submit(run())
-
-    def logout(self, i):
-        if self.backend.testing: self.warn('Дождитесь завершения пробной отправки или нажмите «Стоп».'); return
-        if QMessageBox.question(self, 'Выход из аккаунта', 'Завершить эту сессию Telegram? Сканирование остановится. Для повторного входа потребуется код.') != QMessageBox.StandardButton.Yes: return
-        if i not in self.backend.clients:
-            self.warn('Сначала подключите сохранённую сессию, чтобы завершить её в Telegram.'); return
-        self.backend.submit(self.backend.logout_account(i))
-
-    def start(self):
-        selection = {'all': self.selection['all'], 'names': list(self.selection['names'])}
-        if not selection['all'] and not selection['names']: self.warn('Выберите хотя бы одну коллекцию в разделе «Подарки».'); return
-        if self.live.isChecked() and QMessageBox.question(self, 'Отправка сообщений', 'Отправлять предложения владельцам от подключённых аккаунтов? Убедитесь, что получатели согласны получать сообщения.') != QMessageBox.StandardButton.Yes: return
-        self.backend.begin(self.live.isChecked(), selection)
-
-    def send_test(self):
-        if self.backend.testing or (self.backend.task and not self.backend.task.done()):
-            self.warn('Сначала остановите сканирование и текущую отправку.'); return
-        if QMessageBox.question(self, 'Пробная отправка', f'Каждый подключённый аккаунт отправит одно сообщение в @{TEST_RECIPIENT}:\n\n{TEST_MESSAGE}') != QMessageBox.StandardButton.Yes: return
-        self.backend.submit(self.backend.send_test())
-
-    def refresh_catalog(self):
-        async def run():
-            if self.backend.task and not self.backend.task.done(): self.backend.log('Перед обновлением каталога остановите сканирование.'); return
-            for i, client in sorted(self.backend.clients.items()):
-                if i in self.backend.restricted_accounts or i in self.backend.connecting: continue
-                if await client.is_user_authorized():
-                    try: catalog = await core.watcher.get_gift_catalog(client)
-                    except core.PeerFloodError: self.backend.peer_failure(i, 'read'); return
-                    self.backend.logs.put(('catalog', catalog)); self.backend.log(f'Каталог обновлён: {len(catalog)} коллекций'); return
-            self.backend.log('Подключите аккаунт, чтобы обновить каталог Telegram.')
-        self.backend.submit(run())
+    def logout(self,slot):
+        if QMessageBox.question(self,'Выход из аккаунта','Завершить сессию Telegram? Очередь будет остановлена и сохранена.') == QMessageBox.StandardButton.Yes:
+            self.action('logout',slot)
 
     def load_cover(self):
-        path = DATA / 'banner.png'
-        if not path.exists(): path = core.ROOT / 'assets' / 'banner.png'
-        pixmap = QPixmap(str(path)) if path.exists() else QPixmap()
-        self.wallpaper.cover = pixmap; self.hero.cover = pixmap; self.wallpaper.update(); self.hero.update()
+        cover = QPixmap(str(DATA / 'banner.png'))
+        self.wallpaper.cover = cover; self.hero.cover = cover; self.wallpaper.update(); self.hero.update()
 
     def choose_cover(self):
-        path, _ = QFileDialog.getOpenFileName(self, 'Выберите обложку', '', 'Изображения (*.png *.jpg *.jpeg *.webp)')
+        path,_ = QFileDialog.getOpenFileName(self,'Выбрать обложку','','Изображения (*.png *.jpg *.jpeg *.webp)')
         if not path: return
-        try:
-            with Image.open(path) as image: source = ImageOps.exif_transpose(image).convert('RGB')
-            temporary = DATA / 'banner.tmp.png'; source.save(temporary, format='PNG'); temporary.replace(DATA / 'banner.png')
-        except (OSError, ValueError, Image.DecompressionBombError): self.warn('Не удалось открыть или сохранить изображение.'); return
+        image = QPixmap(path)
+        if image.isNull() or not image.save(str(DATA / 'banner.png'),'PNG'): self.warn('Не удалось сохранить изображение.'); return
         self.load_cover()
 
-    def update_metrics(self):
-        if not hasattr(self, 'metric_values'): return
-        self.metric_values[0].setText(str(len(self.connected - self.backend.restricted_accounts)))
-        if self.selection['all']:
-            collections = str(len(self.catalog)) if self.catalog else 'Все'
-        elif self.catalog:
-            matched = len(core.selected_catalog(self.catalog, self.selection))
-            requested = len(self.selection['names'])
-            collections = f'{matched} / {requested}' if matched != requested else str(matched)
-        else:
-            collections = str(len(self.selection['names']))
-        self.metric_values[1].setText(collections)
-        self.metric_values[2].setText(str(getattr(self, 'sent', 0)))
-        live = hasattr(self, 'live') and self.live.isChecked(); self.mode_badge.setText('ОТПРАВКА' if live else 'ПРЕДПРОСМОТР'); self.side_status.setText('●  Отправка включена' if live else '●  Предпросмотр')
-        scanning = self.backend.task is not None and not self.backend.task.done()
-        running = scanning or self.backend.testing
-        if hasattr(self, 'live'): self.live.setEnabled(not running)
-        if hasattr(self, 'pause_button'):
-            self.pause_button.setEnabled(scanning); self.stop_button.setEnabled(running); self.pause_button.setText('Продолжить' if self.backend.paused else 'Пауза'); self.start_button.setEnabled(not running); self.test_button.setEnabled(not running)
-
-    def append_event(self, widget, level, text):
-        colors = {'info': '#6c727e', 'offer': '#9a781f', 'success': '#25856b', 'warning': '#b87b25', 'error': '#c95757'}
-        scroll = widget.verticalScrollBar(); old = scroll.value(); widget.append(f'<span style="color:{colors.get(level, colors["info"])}">{html.escape(text)}</span>')
-        scroll.setValue(scroll.maximum() if self.follow.isChecked() else old)
-
     def drain(self):
-        for _ in range(250):
-            try: kind, payload = self.backend.logs.get_nowait()
+        self.futures = [future for future in self.futures if not future.done()]
+        while True:
+            try: kind,payload = self.backend.events.get_nowait()
             except queue.Empty: break
-            if kind == 'status':
-                i, text = payload; self.accounts.add(i); self.statuses[i] = text
-                if text == 'Подключён': self.connected.add(i)
-                if i in self.auth_dialogs:
-                    self.auth_dialogs[i].status_label.setText(text)
-                    if text == 'Подключён': self.auth_dialogs[i].accept()
-                self.render_accounts()
-            elif kind == 'signed_out':
-                self.tracker_disabled.discard(payload)
-                self.backend.loop.call_soon_threadsafe(setattr, self.backend, 'tracker_disabled', set(self.tracker_disabled))
-                try: core.write_settings(DATA / 'tracker_disabled.json', sorted(self.tracker_disabled))
-                except OSError: self.backend.log('Ошибка: не удалось сохранить настройки поиска после выхода')
-                for value in self.backend.rows[payload]: value.set('')
-                self.accounts.discard(payload); self.connected.discard(payload); self.statuses.pop(payload, None); self.render_accounts()
-            elif kind == 'catalog': self.catalog = payload; self.render_gifts()
-            elif kind == 'log':
-                level, text = payload; self.history.append((level, text))
-                for widget in (self.preview_log, self.log_text, getattr(self.detached, 'log_text', None)):
-                    if widget is not None: self.append_event(widget, level, text)
-                if '[ОТПРАВЛЕНО]' in text: self.sent += 1
-        self.update_metrics()
+            if kind == 'snapshot': self.show_state(payload)
+            elif kind == 'notice':
+                if payload == 'Правки сохранены.':
+                    self.dirty = False
+                    self.draft_title.setText(f'Черновик · {self.draft_table.rowCount()} получателей')
+                if len(payload) < 250: self.notice.setText(payload)
+                elif 'Исправить язык' not in payload: self.notice.setText('Черновик обновлён. Проверьте таблицу перед подтверждением.')
+            elif kind == 'error': self.warn(payload)
 
-    def open_logs(self):
-        if self.detached: self.detached.raise_(); self.detached.activateWindow(); return
-        dialog = self.detached = QDialog(self); dialog.setWindowTitle('Telegram Offers • Журнал'); dialog.resize(950, 610)
-        box = QVBoxLayout(dialog); box.setContentsMargins(24, 22, 24, 22); row = QHBoxLayout(); row.addWidget(label('Журнал событий', 'pageTitle')); row.addStretch(); row.addWidget(button('Очистить', self.clear_logs)); box.addLayout(row)
-        dialog.log_text = QTextEdit(); dialog.log_text.setReadOnly(True); dialog.log_text.document().setMaximumBlockCount(2500); box.addWidget(dialog.log_text)
-        for level, text in self.history: self.append_event(dialog.log_text, level, text)
-        dialog.finished.connect(lambda result: setattr(self, 'detached', None)); dialog.show()
+    def warn(self,text): QMessageBox.information(self,'Telegram Offers',text)
 
-    def clear_logs(self):
-        self.history.clear(); self.preview_log.clear(); self.log_text.clear()
-        if self.detached: self.detached.log_text.clear()
-
-    def warn(self, text): QMessageBox.information(self, 'Telegram Offers', text)
-
-    @staticmethod
-    def clear_layout(layout):
-        while layout.count():
-            item = layout.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
-
-    def closeEvent(self, event):
+    def closeEvent(self,event):
         if self.closed: event.accept(); return
         event.ignore()
         if self.closing: return
@@ -472,12 +437,21 @@ class Window(QMainWindow):
 
     def finish_close(self):
         if not self.shutdown_future.done(): return
-        self.timer.stop(); self.close_timer.stop(); self.backend.loop.call_soon_threadsafe(self.backend.loop.stop); self.backend.thread.join(timeout=1); self.closed = True; self.close()
+        self.timer.stop(); self.close_timer.stop(); self.backend.loop.call_soon_threadsafe(self.backend.loop.stop)
+        self.backend.thread.join(timeout=1); self.closed = True; self.close()
 
 
 def main():
-    app = QApplication.instance() or QApplication(sys.argv); app.setApplicationName('Telegram Offers'); app.setStyle('Fusion'); app.setStyleSheet(STYLE)
-    window = Window(); window.show(); return app.exec()
+    from bot_runner import process_lock
+    app = QApplication.instance() or QApplication(sys.argv)
+    app.setApplicationName('Telegram Offers'); app.setStyle('Fusion'); app.setStyleSheet(STYLE)
+    core.DATA.chmod(0o700)
+    try:
+        with process_lock():
+            window = Window(); window.show(); return app.exec()
+    except RuntimeError as exc:
+        QMessageBox.information(None,'Telegram Offers',str(exc)+'\nОстановите Telegram-бота или другое окно программы.')
+        return 1
 
 
 if __name__ == '__main__': sys.exit(main())
