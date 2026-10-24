@@ -22,7 +22,7 @@ from manual_queue import ManualQueue, parse_line, render, language, parse_result
 DEFAULT_ADMIN_ID = 8957889799
 MENU = {'keyboard': [['▶️ Запустить', '⏯ Пауза', '⏹ Стоп'], ['📊 Статус', '👤 Аккаунты', '🧾 Логи']], 'resize_keyboard': True}
 HELP = ('Пришлите список: одна строка — один получатель и NFT с итоговой ценой.\n'
-        '@username Scared Cat #16951 425 gram\n'
+        '@username - https://t.me/nft/ScaredCat-1775\nЗатем пришлите общую итоговую цену: 425 gram.\nТакже: @username Scared Cat #16951 425 gram\n'
         'Также можно переслать целиком «Результаты» из парсера и следующим сообщением указать общую цену: 425 gram. /price 425 gram — изменить цену всех строк черновика.\n'
         'Язык по отображаемому имени: cn / ar / ru. Можно указать язык в конце строки.\n'
         '/preview — черновик; /lang 1 cn — изменить язык; /edit 1 <строка> — заменить строку; /enqueue — подтвердить очередь; /cancel — удалить черновик.\n'

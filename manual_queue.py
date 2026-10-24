@@ -33,6 +33,19 @@ def parse_results(text):
     lines = text.replace('**', '').splitlines()
     numbered = [(n, line.strip()) for n, line in enumerate(lines, 1)
                 if re.match(r'^\s*[0-9]+\.\s', line)]
+    if not numbered and 't.me/nft/' in text:
+        rows = [(n, line.strip()) for n, line in enumerate(lines, 1) if line.strip()]
+        if not 1 <= len(rows) <= 100:
+            raise ValueError('Пришлите от 1 до 100 строк получателей.')
+        items = []
+        for line_number, line in rows:
+            match = re.fullmatch(r'@([A-Za-z][A-Za-z0-9_]{3,31})\s*-\s*https://t\.me/nft/([A-Za-z][A-Za-z0-9]*)-([1-9][0-9]*)/?', line)
+            if not match:
+                raise ValueError(f'Не удалось разобрать строку {line_number}. Формат: @username - https://t.me/nft/ScaredCat-1775. Список не загружен.')
+            recipient, slug, number = match.groups()
+            title = re.sub(r'(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])', ' ', slug)
+            items.append(dict(recipient=recipient.lower(), title=title, number=number, price=None, lang=None))
+        return items
     if not numbered and not re.search(r'Результаты\s*\(', text): return None
     if not 1 <= len(numbered) <= 100:
         raise ValueError('В результатах должно быть от 1 до 100 строк получателей.')

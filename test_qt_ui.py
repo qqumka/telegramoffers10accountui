@@ -61,6 +61,16 @@ class DesktopUI(unittest.TestCase):
         self.w.input_text.setPlainText(text); self.w.price.setText('425 gram'); self.w.import_button.click()
         self.wait(lambda: self.w.draft_table.rowCount()>0)
 
+    def test_import_nft_links_with_shared_price(self):
+        async def resolve(name): return User(id=1 if name=='anufreya' else 2,first_name='Имя')
+        self.client.get_entity.side_effect=resolve
+        self.import_results('@Anufreya - https://t.me/nft/ScaredCat-1775\n@Anufreya - https://t.me/nft/ScaredCat-2295\n@paipaiqi - https://t.me/nft/ScaredCat-188')
+        self.assertEqual(self.w.draft_table.rowCount(),3)
+        self.assertEqual(self.w.draft_table.item(0,5).text(),'jdcsnjdc Scared Cat #1775 425 gram ru')
+        self.w.enqueue_button.click()
+        self.wait(lambda:self.w.state['counts'].get('pending')==2)
+        self.client.send_message.assert_not_awaited()
+
     def test_import_edit_confirm_and_send_are_separate(self):
         self.import_results()
         self.assertEqual(self.w.draft_table.rowCount(),14)

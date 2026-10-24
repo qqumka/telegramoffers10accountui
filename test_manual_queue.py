@@ -19,6 +19,23 @@ RESULTS = '✅ **Результаты (14)**\n*Страница 1 из 1*\n\n' +
 
 
 class ResultsTests(unittest.TestCase):
+    def test_username_and_nft_links(self):
+        items = parse_results('@Anufreya - https://t.me/nft/ScaredCat-1775\n@Anufreya - https://t.me/nft/ScaredCat-2295\n@paipaiqi - https://t.me/nft/ScaredCat-188')
+        self.assertEqual([(i['recipient'],i['title'],i['number']) for i in items], [('anufreya','Scared Cat','1775'),('anufreya','Scared Cat','2295'),('paipaiqi','Scared Cat','188')])
+        self.assertTrue(all(i['price'] is None and i['lang'] is None for i in items))
+        self.assertEqual(parse_results('@person1 - https://t.me/nft/MirageLamp-123/')[0]['title'], 'Mirage Lamp')
+
+    def test_large_link_list_preserves_order(self):
+        text='\n'.join(f'@person{i} - https://t.me/nft/ScaredCat-{i+1}' for i in range(82))
+        items=parse_results(text)
+        self.assertEqual(len(items),82)
+        self.assertEqual([i['number'] for i in items],[str(i+1) for i in range(82)])
+
+    def test_invalid_link_rows_reject_entire_import(self):
+        good='@person1 - https://t.me/nft/ScaredCat-1775'
+        for bad in ('@person2 - https://evil.example/nft/ScaredCat-22','@person2 - https://t.me/nft/ScaredCat-0','@person2 - https://t.me/nft/ScaredCat-22 extra','@person2 - https://t.me/nft/ScaredCat-22/more','broken row'):
+            with self.subTest(bad=bad), self.assertRaises(ValueError): parse_results(good+'\n'+bad)
+
     def test_complete_markdown_message(self):
         items = parse_results(RESULTS)
         self.assertEqual(len(items),14)
@@ -139,6 +156,18 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         await self.c.send_queue()
         self.service.send_with_cooldown.assert_not_awaited()
         self.assertIn('failed: 1', self.c.queue.summary())
+
+    async def test_link_list_price_and_duplicate_recipient(self):
+        async def resolve(name): return User(id=1 if name=='anufreya' else 2,first_name='Имя')
+        self.clients[0].get_entity.side_effect=resolve
+        await self.message('@Anufreya - https://t.me/nft/ScaredCat-1775\n@Anufreya - https://t.me/nft/ScaredCat-2295\n@paipaiqi - https://t.me/nft/ScaredCat-188')
+        self.assertEqual(len(self.c.pending_import),3)
+        await self.message('425 gram')
+        self.assertEqual(render(self.c.draft[0]),'jdcsnjdc Scared Cat #1775 425 gram ru')
+        await self.message('/enqueue')
+        self.assertIn('pending: 2',self.c.queue.summary())
+        self.assertIn('#1775',self.c.queue.next()[3])
+        self.service.send_with_cooldown.assert_not_awaited()
 
     async def test_results_wait_for_price_persist_then_allow_manual_changes(self):
         await self.message(RESULTS)

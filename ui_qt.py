@@ -232,11 +232,11 @@ class Window(QMainWindow):
         return table
 
     def create_prepare(self):
-        box = self.page('Подготовка сообщений','Вставьте результаты парсера целиком. Проверьте цену и язык перед добавлением в очередь.')
+        box = self.page('Подготовка сообщений','Вставьте строки @username - ссылка NFT и задайте общую цену. Проверьте каждое сообщение перед подтверждением.')
         self.hero = Hero(); self.hero.setMinimumHeight(150); box.addWidget(self.hero)
         panel, inner = card()
         self.input_text = QTextEdit(); self.input_text.setObjectName('input'); self.input_text.setAcceptRichText(False)
-        self.input_text.setPlaceholderText('✅ Результаты (14)\n1. [T] [⭐ Lv.1] @username - Scared Cat (#16951) (+1)\n\nИли: @username Scared Cat #16951 425 gram')
+        self.input_text.setPlaceholderText('@Anufreya - https://t.me/nft/ScaredCat-1775\n@paipaiqi - https://t.me/nft/ScaredCat-188\n\nТакже поддерживаются результаты парсера и ручные строки с ценой.')
         self.input_text.setMinimumHeight(100); self.input_text.setMaximumHeight(160); inner.addWidget(self.input_text)
         row = QHBoxLayout(); self.price = QLineEdit(); self.price.setPlaceholderText('Общая итоговая цена: 425 gram'); row.addWidget(self.price,1)
         self.import_button = button('Разобрать список',self.import_list,'primary'); row.addWidget(self.import_button)
@@ -302,7 +302,7 @@ class Window(QMainWindow):
         return value if not value or value.lower().endswith('gram') else value+' gram'
 
     def import_list(self):
-        if not self.input_text.toPlainText().strip(): self.warn('Вставьте список получателей.'); return
+        if not self.input_text.toPlainText().strip(): self.warn('Вставьте список: @username - https://t.me/nft/ScaredCat-1775'); return
         self.action('import',self.input_text.toPlainText(),self.price_text())
 
     def apply_price(self):
